@@ -155,6 +155,28 @@ Contents API 传 5 个文件需要 5 次 PUT = 5 个 commit，中途断网留下
 
 六步中前五步都不改变仓库状态，最后一步才移动指针，天然原子。
 
+### 4.1.1 空仓库要先引导出首个提交
+
+对一个刚创建、还没有任何提交的仓库，上面的第 1 步会返回
+`409 {"message":"Git Repository is empty."}`，而且这不是并发冲突——此时整个
+Git Data API 都不可用，`POST /git/blobs` 同样是 409。只有 Contents API 能落下
+第一个提交。
+
+所以遇到空仓库时先插入一步引导，再走原流程：
+
+```
+0. PUT /repos/{owner}/{repo}/contents/README.md
+   body: {"message": "初始化数据仓库", "content": "<base64>", "branch": "main"}
+   → 生成初始提交，仓库有了 HEAD
+```
+
+之后重新读取 `GET /repos/{owner}/{repo}` 拿实际默认分支（空仓库的
+`default_branch` 可能为 `null`，而 Android 的 `JSONObject.optString` 对 JSON null
+会返回字符串 `"null"`，不处理就会去查 `refs/heads/null`），再按第 1～6 步正常提交。
+
+引导只在仓库首次上传时发生一次，代价是数据仓库里多一个 `README.md`
+和一条「初始化数据仓库」提交，说明文件本身也顺便写清了这个仓库的用途与取回方式。
+
 ### 4.2 仓库结构
 
 ```

@@ -62,12 +62,71 @@ public class GitHubClient {
         RepoInfo info = new RepoInfo();
         info.isPrivate = o.optBoolean("private", false);
         info.fullName = o.optString("full_name", owner + "/" + repo);
-        String branch = o.optString("default_branch", "main");
-        info.defaultBranch = (branch == null || branch.length() == 0) ? "main" : branch;
+        // 空仓库的 default_branch 可能为 null，而 Android 的 optString 对 JSON null
+        // 会返回字符串 "null"，不处理就会去查 refs/heads/null。
+        String branch = o.optString("default_branch", "");
+        if (branch == null || branch.length() == 0
+                || "null".equals(branch) || "undefined".equals(branch)) {
+            branch = "main";
+        }
+        info.defaultBranch = branch;
         return info;
     }
 
     // ------------------------------------------------------------ 提交
+
+    private static final byte[] BOOTSTRAP_README = (
+            "# screen tracking data\n"
+            + "\n"
+            + "本仓库保存屏幕使用数据的每日快照，由手机端自动上传，不含代码。\n"
+            + "\n"
+            + "## 文件\n"
+            + "\n"
+            + "- `YYYY/MM/DD.sce` —— 当日全量快照\n"
+            + "- `latest.sce` —— 最新一份副本\n"
+            + "\n"
+            + "`.sce` 是自描述容器：`SCE1` + 1 字节模式（0x00 明文 / 0x01 密码 / 0x02 公钥）\n"
+            + "+ 内容。里面是一个 zip，含 `screentime.json` 与 4 份 CSV。\n"
+            + "\n"
+            + "## 取回\n"
+            + "\n"
+            + "```bash\n"
+            + "python3 tools/decrypt.py latest.sce -o out                 # 明文\n"
+            + "python3 tools/decrypt.py latest.sce -o out -p '密码'        # 密码模式\n"
+            + "python3 tools/decrypt.py latest.sce -o out -k private.pem  # 公钥模式\n"
+            + "```\n"
+            ).getBytes(Charset.forName("UTF-8"));
+
+    /**
+     * 空仓库引导：GitHub 对一个尚无任何提交的仓库会拒绝整个 Git Data API
+     * （blob / tree / commit 全部返回 409 "Git Repository is empty."），
+     * 只有 Contents API 能落下第一个提交。所以先写一个说明文件，让仓库有 HEAD，
+     * 之后的正常提交才能走原子化的 Git Data API。
+     */
+    private void bootstrapInitialCommit(String branch) throws IOException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("message", "初始化数据仓库");
+            body.put("content", Base64.encodeToString(BOOTSTRAP_README, Base64.NO_WRAP));
+            if (branch != null && branch.length() > 0) {
+                body.put("branch", branch);
+            }
+        } catch (JSONException e) {
+            throw new IOException("构造初始化请求失败", e);
+        }
+        String path = "/repos/" + owner + "/" + repo + "/contents/README.md";
+        try {
+            putJson(path, body);
+        } catch (ApiException e) {
+            // 空仓库指定 branch 可能返回 422（分支尚不存在），去掉 branch 再试一次
+            if (e.status == 422 && body.has("branch")) {
+                body.remove("branch");
+                putJson(path, body);
+            } else {
+                throw e;
+            }
+        }
+    }
 
     /**
      * 把多个文件放进同一个 commit 推上去。
@@ -80,22 +139,46 @@ public class GitHubClient {
         RepoInfo info = repoInfo();
         String branch = info.defaultBranch;
 
-        // 1. 当前分支指向的 commit
-        JSONObject ref = getJson("/repos/" + owner + "/" + repo + "/git/ref/heads/" + branch, null);
-        String headSha;
+        // 1. 当前分支指向的 commit。
+        //    仓库刚建好、一个提交都没有时，GitHub 对 ref 查询返回 409
+        //    （{"message":"Git Repository is empty."}），这不是并发冲突。
+        String headSha = null;
         try {
+            JSONObject ref = getJson("/repos/" + owner + "/" + repo + "/git/ref/heads/" + branch, null);
             headSha = ref.getJSONObject("object").getString("sha");
+        } catch (ApiException e) {
+            if (e.status != 409 && e.status != 404) {
+                throw e;
+            }
+            headSha = null;   // 空仓库，从零开始
         } catch (JSONException e) {
             throw new IOException("分支 " + branch + " 的响应缺少 sha 字段", e);
         }
 
-        // 2. 该 commit 的 tree
-        JSONObject headCommit = getJson("/repos/" + owner + "/" + repo + "/git/commits/" + headSha, null);
-        String baseTree;
-        try {
-            baseTree = headCommit.getJSONObject("tree").getString("sha");
-        } catch (JSONException e) {
-            throw new IOException("commit 响应缺少 tree 字段", e);
+        // 2. 空仓库先引导出首个提交，再重新取 HEAD
+        if (headSha == null) {
+            bootstrapInitialCommit(branch);
+            RepoInfo again = repoInfo();
+            if (again.defaultBranch != null && again.defaultBranch.length() > 0) {
+                branch = again.defaultBranch;
+            }
+            JSONObject ref = getJson("/repos/" + owner + "/" + repo + "/git/ref/heads/" + branch, null);
+            try {
+                headSha = ref.getJSONObject("object").getString("sha");
+            } catch (JSONException e) {
+                throw new IOException("初始化后仍取不到分支 " + branch + " 的 sha", e);
+            }
+        }
+
+        // 3. 该 commit 的 tree
+        String baseTree = null;
+        if (headSha != null) {
+            JSONObject headCommit = getJson("/repos/" + owner + "/" + repo + "/git/commits/" + headSha, null);
+            try {
+                baseTree = headCommit.getJSONObject("tree").getString("sha");
+            } catch (JSONException e) {
+                throw new IOException("commit 响应缺少 tree 字段", e);
+            }
         }
 
         // 3. 逐个上传 blob
@@ -121,27 +204,39 @@ public class GitHubClient {
             }
         }
 
-        // 4. 新 tree（基于旧 tree，只增改本批文件）
+        // 4. 新 tree（有父提交时基于旧 tree，只增改本批文件；空仓库则不带 base_tree）
         try {
             JSONObject treeBody = new JSONObject();
-            treeBody.put("base_tree", baseTree);
+            if (baseTree != null) {
+                treeBody.put("base_tree", baseTree);
+            }
             treeBody.put("tree", tree);
             JSONObject newTree = postJson("/repos/" + owner + "/" + repo + "/git/trees", treeBody);
             String newTreeSha = newTree.getString("sha");
 
-            // 5. 新 commit
+            // 5. 新 commit（空仓库没有父提交）
             JSONObject commitBody = new JSONObject();
             commitBody.put("message", message);
             commitBody.put("tree", newTreeSha);
-            commitBody.put("parents", new JSONArray().put(headSha));
+            JSONArray parents = new JSONArray();
+            if (headSha != null) {
+                parents.put(headSha);
+            }
+            commitBody.put("parents", parents);
             JSONObject newCommit = postJson("/repos/" + owner + "/" + repo + "/git/commits", commitBody);
             String newCommitSha = newCommit.getString("sha");
 
-            // 6. 移动分支指针，这一步才真正改变仓库
+            // 6. 移动分支指针，这一步才真正改变仓库。
+            //    空仓库还没有这个分支，要 POST 创建而不是 PATCH 移动。
             JSONObject refBody = new JSONObject();
             refBody.put("sha", newCommitSha);
-            request("PATCH", "/repos/" + owner + "/" + repo + "/git/refs/heads/" + branch,
-                    refBody.toString());
+            if (headSha == null) {
+                refBody.put("ref", "refs/heads/" + branch);
+                postJson("/repos/" + owner + "/" + repo + "/git/refs", refBody);
+            } else {
+                request("PATCH", "/repos/" + owner + "/" + repo + "/git/refs/heads/" + branch,
+                        refBody.toString());
+            }
             return newCommitSha;
         } catch (JSONException e) {
             throw new IOException("构造提交失败", e);
@@ -156,6 +251,10 @@ public class GitHubClient {
 
     private JSONObject postJson(String path, JSONObject body) throws IOException {
         return parse(request("POST", path, body.toString()));
+    }
+
+    private JSONObject putJson(String path, JSONObject body) throws IOException {
+        return parse(request("PUT", path, body.toString()));
     }
 
     private JSONObject parse(String s) throws IOException {
@@ -213,7 +312,10 @@ public class GitHubClient {
         } else if (code == 404) {
             hint = "仓库不存在，或 Token 无权访问";
         } else if (code == 409 || code == 422) {
-            hint = "分支被并发修改，稍后重试";
+            String lower = body == null ? "" : body.toLowerCase(java.util.Locale.US);
+            // 空仓库的 ref 查询也会返回 409，但 commit() 已按空仓库处理，
+            // 走到这里通常是真的并发写入冲突。
+            hint = lower.contains("empty") ? "仓库还没有任何提交，请重试" : "分支被并发修改，稍后重试";
         } else {
             hint = "请求失败";
         }
