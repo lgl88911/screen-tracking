@@ -29,6 +29,7 @@ public class SyncActivity extends Activity {
     private static final int ID_BASE = 1000;
 
     private EditText repoField;
+    private EditText deviceField;
     private EditText tokenField;
     private EditText pwField;
     private EditText pubKeyField;
@@ -66,8 +67,12 @@ public class SyncActivity extends Activity {
         repoField.setSingleLine(true);
         root.addView(repoField, lp(-1, dp(46)));
 
-        root.addView(label("Token（fine-grained，仅需该仓库 Contents 读写）"), lp(-1, -2));
-        tokenField = input("留空则不修改已保存的 Token");
+        root.addView(label("设备标识（本机在仓库里的目录名，多设备靠它区分）"), lp(-1, -2));
+        deviceField = input("留空则按机型自动生成");
+        deviceField.setSingleLine(true);
+        root.addView(deviceField, lp(-1, dp(46)));
+
+        root.addView(label("Token（fine-grained，仅需该仓库 Contents 读写）"), lp(-1, -2));        tokenField = input("留空则不修改已保存的 Token");
         tokenField.setSingleLine(true);
         tokenField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         root.addView(tokenField, lp(-1, dp(46)));
@@ -152,6 +157,8 @@ public class SyncActivity extends Activity {
     private void loadConfig() {
         SyncManager.Config c = SyncManager.load(this);
         repoField.setText(c.repo);
+        // 未设置过就按机型生成一次并固定，避免每次同步换目录
+        deviceField.setText(SyncManager.deviceId(this));
         pubKeyField.setText(c.publicKeyB64);
         // hint 每次都要按实际状态重设，否则清除凭据后界面仍显示「已保存」
         tokenField.setHint(SyncManager.getToken(this) != null
@@ -176,6 +183,19 @@ public class SyncActivity extends Activity {
             return;
         }
         SyncManager.setRepo(this, repo);
+
+        String dev = deviceField.getText().toString().trim();
+        if (dev.length() > 0) {
+            String clean = SyncManager.sanitizeDeviceId(dev);
+            if (clean == null) {
+                toast("设备标识不能为空，只能用字母、数字、- 和 _");
+                return;
+            }
+            if (!clean.equals(dev)) {
+                deviceField.setText(clean);
+            }
+            SyncManager.setDeviceId(this, clean);
+        }
 
         String token = tokenField.getText().toString().trim();
         if (token.length() > 0) {
@@ -306,6 +326,8 @@ public class SyncActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         sb.append("当前模式：").append(SyncManager.modeName(c.mode)).append('\n');
         sb.append("仓库：").append(c.repo.length() == 0 ? "未设置" : c.repo).append('\n');
+        sb.append("设备目录：").append(SyncPaths.deviceDir(SyncManager.deviceId(this)))
+                .append('\n');
         sb.append("Token：").append(SyncManager.getToken(this) == null ? "未设置" : "已保存").append('\n');
         if (ok > 0) {
             sb.append("上次成功：").append(ago(ok)).append("（")

@@ -80,10 +80,21 @@ public class GitHubClient {
             + "\n"
             + "本仓库保存屏幕使用数据的每日快照，由手机端自动上传，不含代码。\n"
             + "\n"
-            + "## 文件\n"
+            + "## 目录\n"
             + "\n"
-            + "- `YYYY/MM/DD.sce` —— 当日全量快照\n"
-            + "- `latest.sce` —— 最新一份副本\n"
+            + "每台设备一个目录，多设备共用同一仓库时互不覆盖：\n"
+            + "\n"
+            + "```\n"
+            + "devices/\n"
+            + "  <设备标识>/\n"
+            + "    2026/11/15.sce    当日全量快照\n"
+            + "    2026/11/16.sce\n"
+            + "    latest.sce        该设备最新一份副本\n"
+            + "```\n"
+            + "\n"
+            + "设备标识在同步设置里可改，默认由机型加随机后缀生成。\n"
+            + "\n"
+            + "## 文件格式\n"
             + "\n"
             + "`.sce` 是自描述容器：`SCE1` + 1 字节模式（0x00 明文 / 0x01 密码 / 0x02 公钥）\n"
             + "+ 内容。里面是一个 zip，含 `screentime.json` 与 4 份 CSV。\n"
@@ -136,6 +147,31 @@ public class GitHubClient {
      * @return 新 commit 的 sha
      */
     public String commit(Map<String, byte[]> files, String message) throws IOException {
+        // 多台设备共用一个仓库时，两台同时上传会让后者的 ref 移动失败（422/409）。
+        // 这类冲突重试即可：重新读取 HEAD 后整批重做，blob 按内容去重不会重复占空间。
+        IOException last = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                return commitOnce(files, message);
+            } catch (ApiException e) {
+                if (e.status != 409 && e.status != 422) {
+                    throw e;
+                }
+                last = e;
+                if (attempt < 2) {
+                    try {
+                        Thread.sleep(500L * (attempt + 1));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        }
+        throw last == null ? new IOException("提交失败") : last;
+    }
+
+    private String commitOnce(Map<String, byte[]> files, String message) throws IOException {
         RepoInfo info = repoInfo();
         String branch = info.defaultBranch;
 
@@ -369,13 +405,6 @@ public class GitHubClient {
             return null;
         }
         return parts;
-    }
-
-    /** 生成仓库内路径：2026/11/15.sce */
-    public static String dayPath(long ts) {
-        java.text.SimpleDateFormat f =
-                new java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.US);
-        return f.format(new java.util.Date(ts)) + ".sce";
     }
 
     public static String commitMessage(long ts, String modeName) {

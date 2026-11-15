@@ -24,6 +24,7 @@ public final class SyncManager {
     public static final String K_REPO = "repo";
     public static final String K_MODE = "mode";
     public static final String K_PUBKEY = "pubkey";
+    public static final String K_DEVICE = "device";
     public static final String K_LAST_OK = "last_ok";
     public static final String K_LAST_ERR = "last_err";
     public static final String K_LAST_TRY = "last_try";
@@ -44,6 +45,7 @@ public final class SyncManager {
         public String repo = "";
         public int mode = Crypto.MODE_PLAIN;
         public String publicKeyB64 = "";
+        public String device = "";
 
         public boolean hasRepo() {
             return GitHubClient.parseRepo(repo) != null;
@@ -56,6 +58,7 @@ public final class SyncManager {
         c.repo = p.getString(K_REPO, "");
         c.mode = p.getInt(K_MODE, Crypto.MODE_PLAIN);
         c.publicKeyB64 = p.getString(K_PUBKEY, "");
+        c.device = sanitizeDeviceId(p.getString(K_DEVICE, ""));
         return c;
     }
 
@@ -69,6 +72,44 @@ public final class SyncManager {
 
     public static void setPublicKey(Context ctx, String pemOrBase64) {
         prefs(ctx).edit().putString(K_PUBKEY, normalizePublicKey(pemOrBase64)).apply();
+    }
+
+    // ------------------------------------------------------------ 设备标识
+
+    /**
+     * 仓库内每台设备一个目录，避免多设备互相覆盖 latest.sce。
+     * 未设置时按机型加随机后缀生成一次并固定下来。
+     */
+    public static String deviceId(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        String d = sanitizeDeviceId(p.getString(K_DEVICE, ""));
+        if (d == null) {
+            d = defaultDeviceId();
+            p.edit().putString(K_DEVICE, d).apply();
+        }
+        return d;
+    }
+
+    public static void setDeviceId(Context ctx, String raw) {
+        String d = sanitizeDeviceId(raw);
+        if (d != null) {
+            prefs(ctx).edit().putString(K_DEVICE, d).apply();
+        }
+    }
+
+    /** 名称清洗规则在 SyncPaths 里，那边不依赖 android，可桌面单测。 */
+    public static String sanitizeDeviceId(String raw) {
+        return SyncPaths.sanitizeDeviceId(raw);
+    }
+
+    private static String defaultDeviceId() {
+        String model;
+        try {
+            model = android.os.Build.MODEL;
+        } catch (Throwable t) {
+            model = null;
+        }
+        return SyncPaths.defaultDeviceId(model);
     }
 
     public static void setToken(Context ctx, String token) {
@@ -147,6 +188,7 @@ public final class SyncManager {
         public boolean ok;
         public String message = "";
         public String commitSha = "";
+        public String device = "";
         public long when;
         public int bytes;
     }
@@ -166,6 +208,8 @@ public final class SyncManager {
         if (token == null || token.length() == 0) {
             return fail(ctx, r, "未设置 Token");
         }
+        String device = deviceId(ctx);
+        r.device = device;
 
         byte[] payload;
         try {
@@ -198,13 +242,14 @@ public final class SyncManager {
             }
 
             Map<String, byte[]> files = new LinkedHashMap<String, byte[]>();
-            files.put(GitHubClient.dayPath(r.when), sce);
-            files.put("latest.sce", sce);
+            files.put(SyncPaths.day(device, r.when), sce);
+            files.put(SyncPaths.latest(device), sce);
             String sha = gh.commit(files, GitHubClient.commitMessage(r.when, modeName(cfg.mode)));
 
             r.ok = true;
             r.commitSha = sha;
-            r.message = "已上传 " + (sce.length / 1024 + 1) + " KB，commit " + shortSha(sha);
+            r.message = "已上传 " + (sce.length / 1024 + 1) + " KB 到 "
+                    + SyncPaths.deviceDir(device) + "，commit " + shortSha(sha);
             prefs(ctx).edit()
                     .putLong(K_LAST_OK, r.when)
                     .remove(K_LAST_ERR)

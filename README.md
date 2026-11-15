@@ -115,13 +115,26 @@ PC 端 `tools/decrypt.py` 读模式字节自动分支，不需要告诉它用哪
 Android Keystore 加密后才落盘。
 
 **上传时机**：采集后自动（含后台 Job 与启动补采），也可在配置页点「立即同步」。
-仓库路径为 `YYYY/MM/DD.sce` 外加一份 `latest.sce`，单次上传一个 commit，走 Git Data API 原子提交。
+
+**多设备**：仓库里每台设备一个目录，共用同一个仓库也不会互相覆盖：
+
+```
+devices/
+  phone-a-3f9a/          设备标识，可自己改
+    2026/11/15.sce         当日全量快照
+    latest.sce             该设备最新一份
+```
+
+设备标识首次进同步页时按「机型 + 4 位随机后缀」生成并固定，之后可在配置页改。
+只允许小写字母、数字、`-`、`_`，其它字符会被折叠成 `-`，清洗后为空则回退到 `phone-xxxx`。
+两台设备同时上传触发 ref 冲突时会自动重试（重新读取 HEAD 后整批重做），
+单次上传仍是一个 commit。
 
 **在电脑上解开**：
 
 ```bash
-python3 tools/genkeys.py -o ~/.config/screentime/   # 仅公钥模式需要
-python3 tools/decrypt.py 2026/11/15.sce -o out/     # 模式自动识别，密码模式会提示输入
+python3 tools/genkeys.py -o ~/.config/screentime/              # 仅公钥模式需要
+python3 tools/decrypt.py devices/<设备标识>/latest.sce -o out/  # 模式自动识别，密码模式会提示输入
 ```
 
 完整设计（容器字节布局、六步 API、密钥管理、风险对策）见 `docs/sync-design.md`。
@@ -158,9 +171,10 @@ bash app/test/run.sh          # 事件重建算法 22 项
 bash app/test/run_crypto.sh   # 三档加密封装 14 项，并在 /tmp/sce-test 留下跨语言验证样本
 ```
 
-`UsageAnalyzer` 与 `Crypto` 都不引用 `android.*`，桌面 JDK 直接跑。前者覆盖跨午夜切分、
-灭屏/关机收口、末尾截断、启动去重、同时刻事件排序、乱序输入、空输入；后者覆盖三档往返、
-错误密码被拒、GCM 检出篡改、zip 可复现、缺私钥时明确报错。
+`UsageAnalyzer`、`Crypto`、`SyncPaths` 都不引用 `android.*`，桌面 JDK 直接跑。第一个覆盖跨午夜
+切分、灭屏/关机收口、末尾截断、启动去重、同时刻事件排序、乱序输入、空输入；第二个覆盖三档
+往返、错误密码被拒、GCM 检出篡改、zip 可复现、缺私钥时明确报错；第三个覆盖设备标识清洗
+（斜杠、点号、中文、超长截断）与多设备路径互不重叠。
 
 `run_crypto.sh` 跑完可以用 `tools/decrypt.py` 解 `/tmp/sce-test/*.sce` 验证与 Python 侧互通。
 
@@ -177,13 +191,14 @@ app/
     Exporter.java             JSON + 4 份 CSV，MediaStore / 外部目录双写
     ReportActivity.java       按时间段查看报表（总时间 / 排名 / 指定应用）
     Crypto.java               三档封装与解包（zip / PBKDF2 / AES-GCM / RSA-OAEP）
-    GitHubClient.java         Git Data API 六步原子提交
+    GitHubClient.java         Git Data API 六步原子提交（含空仓库引导、冲突重试）
+    SyncPaths.java            仓库路径与设备标识规则（可桌面单测）
     SecretStore.java          Keystore 保护 Token 与密码派生 DEK
     SyncManager.java          同步编排：打包 → 加密 → 上传 → 记录状态
     SyncActivity.java         同步设置界面
     AutoCollectService.java   JobService 后台快照 + 顺带同步
     MainActivity.java         单页界面
-  test/                       AnalyzerTest / CryptoTest + 对应 run.sh
+  test/                       AnalyzerTest / CryptoTest / DeviceIdTest + run.sh
 miui_install_confirm.py       MIUI 安装弹窗自动确认
 tools/gen_report.py           由 screentime.json 生成 report.html
 tools/genkeys.py              生成 RSA 密钥对（公钥加密模式）
