@@ -310,11 +310,14 @@ public class SyncActivity extends Activity {
         if (bound) {
             deviceMeta.setText("已锁定，此后不可修改。仓库目录 " + SyncPaths.deviceDir(id));
         } else {
-            deviceMeta.setText("尚未确定。这台手机第一次用选「新建」，重装应用选「从仓库选择」以接上原有历史。");
+            deviceMeta.setText("尚未确定。这台手机第一次用选「新建」；重装应用选「从仓库选择」，"
+                    + "会列出仓库里的全部设备，选中哪台就用它的标识。");
         }
         bindNewBtn.setText("用本机新标识：" + SyncManager.suggestedDeviceId(this));
         bindNewBtn.setVisibility(bound ? View.GONE : View.VISIBLE);
+        pickBtn.setText("从仓库选择设备并恢复数据");
         pickBtn.setVisibility(bound ? View.GONE : View.VISIBLE);
+        pullBtn.setText("从仓库重新下载本机数据");
         pullBtn.setVisibility(bound ? View.VISIBLE : View.GONE);
     }
 
@@ -346,22 +349,77 @@ public class SyncActivity extends Activity {
         if (busy) {
             return;
         }
-        if (!SyncManager.load(this).hasRepo()) {
-            toast("先填写仓库地址并保存");
+        // 重装后第一次进来时仓库和 Token 都还是空的，这里就地补填，
+        // 不必让用户先去下面找输入框再回来按按钮。
+        if (!SyncManager.load(this).hasRepo() || SyncManager.getToken(this) == null) {
+            askConnection();
             return;
         }
-        if (SyncManager.getToken(this) == null) {
-            toast("先填写 Token 并保存");
-            return;
-        }
+        loadRemoteDevices();
+    }
+
+    /** 就地填仓库地址与 Token，填完直接接着列设备。 */
+    private void askConnection() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+
+        TextView tip = new TextView(this);
+        tip.setText("列出仓库中的设备需要仓库地址和 Token，两者只保存在本机。");
+        tip.setTextSize(12);
+        tip.setTextColor(Color.rgb(130, 130, 130));
+        tip.setPadding(0, 0, 0, dp(8));
+        box.addView(tip, lp(-1, -2));
+
+        final EditText repoIn = input("owner/repo，或 clone 地址");
+        repoIn.setSingleLine(true);
+        repoIn.setText(SyncManager.load(this).repo);
+        box.addView(repoIn, lp(-1, dp(46)));
+
+        final EditText tokenIn = input("Token（fine-grained，Contents 读写）");
+        tokenIn.setSingleLine(true);
+        tokenIn.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        box.addView(tokenIn, lp(-1, dp(46)));
+
+        new AlertDialog.Builder(this)
+                .setTitle("连接仓库")
+                .setView(box)
+                .setPositiveButton("连接并列出设备", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        String repo = repoIn.getText().toString().trim();
+                        if (GitHubClient.parseRepo(repo) == null) {
+                            toast("仓库地址无效，应形如 owner/repo");
+                            return;
+                        }
+                        String token = tokenIn.getText().toString().trim();
+                        if (token.length() == 0 && SyncManager.getToken(SyncActivity.this) == null) {
+                            toast("请填写 Token");
+                            return;
+                        }
+                        SyncManager.setRepo(SyncActivity.this, repo);
+                        if (token.length() > 0) {
+                            SyncManager.setToken(SyncActivity.this, token);
+                        }
+                        repoField.setText(repo);
+                        loadConfig();
+                        loadRemoteDevices();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void loadRemoteDevices() {
         busy = true;
         pickBtn.setEnabled(false);
-        status.setText("正在读取仓库里的设备目录…");
+        status.setText("正在读取仓库里的设备…");
 
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final java.util.List<String> devs = new java.util.ArrayList<String>();
+                final java.util.List<DeviceCatalog.Device> devs =
+                        new java.util.ArrayList<DeviceCatalog.Device>();
                 String err = null;
                 try {
                     devs.addAll(SyncManager.listRemoteDevices(SyncActivity.this));
@@ -380,7 +438,9 @@ public class SyncActivity extends Activity {
                             return;
                         }
                         if (devs.isEmpty()) {
-                            status.setText("仓库里还没有任何设备目录。\n这是第一次上传，用「新建」即可。");
+                            status.setText("仓库里还没有任何设备目录。\n"
+                                    + "这是第一次上传，用「新建」即可；\n"
+                                    + "若之前确实上传过，先确认仓库地址和 Token 是否指向同一个仓库。");
                             toast("仓库里没有可选的设备");
                             return;
                         }
@@ -391,38 +451,44 @@ public class SyncActivity extends Activity {
         }).start();
     }
 
-    private void showDeviceChooser(final java.util.List<String> devs) {
-        status.setText("仓库里共 " + devs.size() + " 个设备目录");
+    private void showDeviceChooser(final java.util.List<DeviceCatalog.Device> devs) {
+        status.setText("仓库里共 " + devs.size() + " 台设备，选中哪一台就用它的标识：");
+
+        String[] items = new String[devs.size()];
+        for (int i = 0; i < devs.size(); i++) {
+            items[i] = devs.get(i).line();
+        }
         new AlertDialog.Builder(this)
-                .setTitle("选择已有设备")
-                .setItems(devs.toArray(new String[devs.size()]),
-                        new DialogInterface.OnClickListener() {
-                            @Override
-                            public void onClick(DialogInterface d, int which) {
-                                confirmBindExisting(devs.get(which));
-                            }
-                        })
+                .setTitle("仓库中的设备（" + devs.size() + "）")
+                .setItems(items, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        confirmBindExisting(devs.get(which));
+                    }
+                })
                 .setNegativeButton("取消", null)
                 .show();
     }
 
-    private void confirmBindExisting(final String dev) {
+    private void confirmBindExisting(final DeviceCatalog.Device dev) {
+        String body = dev.id + "\n" + dev.summary()
+                + "\n\n绑定后本机标识就是 " + dev.id + "，此后不可修改。"
+                + "现在是否同时把它在仓库里的最新快照下载到本机？";
         new AlertDialog.Builder(this)
-                .setTitle(dev)
-                .setMessage("绑定为该设备后不可修改，之后本机的采集都会继续写进这个目录。\n\n"
-                        + "现在是否同时把它在仓库里的最新快照下载到本机？")
-                .setPositiveButton("绑定并下载", new DialogInterface.OnClickListener() {
+                .setTitle("使用这台设备")
+                .setMessage(body)
+                .setPositiveButton("绑定并恢复数据", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        if (doBind(dev)) {
-                            runPull(null, null);
+                        if (doBind(dev.id)) {
+                            runPull(null, null, dev);
                         }
                     }
                 })
                 .setNegativeButton("仅绑定", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        doBind(dev);
+                        doBind(dev.id);
                     }
                 })
                 .show();
@@ -442,6 +508,11 @@ public class SyncActivity extends Activity {
     // ------------------------------------------------------------ 拉回历史
 
     private void runPull(final String password, final SyncManager.Pull retry) {
+        runPull(password, retry, null);
+    }
+
+    private void runPull(final String password, final SyncManager.Pull retry,
+                         final DeviceCatalog.Device hint) {
         if (busy) {
             return;
         }
@@ -457,8 +528,8 @@ public class SyncActivity extends Activity {
             @Override
             public void run() {
                 final String device = SyncManager.deviceId(SyncActivity.this);
-                final SyncManager.Pull p = retry == null
-                        ? SyncManager.pullNow(SyncActivity.this, device, password)
+                final SyncManager.Pull p = (retry == null || !retry.ok)
+                        ? SyncManager.pullNow(SyncActivity.this, device, hint, password)
                         : SyncManager.unpack(SyncActivity.this, retry, password);
                 ui.post(new Runnable() {
                     @Override
@@ -475,10 +546,26 @@ public class SyncActivity extends Activity {
                         refreshStatus();
                         status.setText(status.getText() + "\n\n"
                                 + (p.ok ? "导入结果\n" : "导入失败\n") + p.message);
+                        if (p.ok) {
+                            showRestoreResult(p);
+                        }
                     }
                 });
             }
         }).start();
+    }
+
+    /** 恢复完成后的收尾提示：标识已锁定、数据落到本机、之后正常采集即可。 */
+    private void showRestoreResult(SyncManager.Pull p) {
+        new AlertDialog.Builder(this)
+                .setTitle("恢复完成")
+                .setMessage("设备标识：" + SyncManager.deviceId(this) + "（已锁定）\n\n"
+                        + p.message + "\n\n"
+                        + "之后这台手机的采集会继续写进 "
+                        + SyncPaths.deviceDir(SyncManager.deviceId(this))
+                        + "，报表里已经能看到恢复回来的历史。")
+                .setPositiveButton("知道了", null)
+                .show();
     }
 
     private void askPassword(final SyncManager.Pull pending) {

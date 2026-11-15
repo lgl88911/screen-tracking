@@ -24,3 +24,12 @@ OUT3="$(mktemp -d /tmp/st-import.XXXXXX)"
     "$APP_DIR/src/com/screentime/export/SnapshotImporter.java" \
     "$APP_DIR/test/ImportTest.java"
 "$JDK/bin/java" -cp "$OUT3" ImportTest
+
+# 仓库设备列表：DeviceCatalog + Json（Json 是自己写的解析器，不依赖 org.json）
+OUT4="$(mktemp -d /tmp/st-catalog.XXXXXX)"
+"$JDK/bin/javac" -encoding UTF-8 -d "$OUT4" \
+    "$APP_DIR/src/com/screentime/export/Json.java" \
+    "$APP_DIR/src/com/screentime/export/SyncPaths.java" \
+    "$APP_DIR/src/com/screentime/export/DeviceCatalog.java" \
+    "$APP_DIR/test/DeviceCatalogTest.java"
+"$JDK/bin/java" -cp "$OUT4" DeviceCatalogTest

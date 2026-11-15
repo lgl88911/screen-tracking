@@ -76,42 +76,65 @@ public class GitHubClient {
     // ------------------------------------------------------------ 读取仓库内容
 
     /**
-     * 仓库里已有哪些设备目录。空仓库或还没上传过任何设备时返回空列表，
-     * 不抛错 —— 「第一次用，仓库里什么都没有」是正常状态。
+     * 仓库里所有设备的概况。一次 git/trees 请求拿到全部目录、快照数、最近一天；
+     * 空仓库（还没有任何提交）时回退到 contents 列表，仍是空列表而不抛错
+     * —— 「第一次用，仓库里什么都没有」是正常状态。
      */
-    public java.util.List<String> listDevices() throws IOException {
-        java.util.List<String> out = new java.util.ArrayList<String>();
-        String raw;
+    public java.util.List<DeviceCatalog.Device> listDeviceInfos() throws IOException {
+        RepoInfo info = repoInfo();
+        java.util.List<DeviceCatalog.Device> out = null;
         try {
-            raw = request("GET", "/repos/" + owner + "/" + repo + "/contents/" + SyncPaths.ROOT_NAME, null);
+            String raw = request("GET", "/repos/" + owner + "/" + repo + "/git/trees/"
+                    + info.defaultBranch + "?recursive=1", null);
+            out = DeviceCatalog.parseTree(raw);
+        } catch (ApiException e) {
+            if (e.status != 404 && e.status != 409) {
+                throw e;
+            }
+        }
+        if (out != null && !out.isEmpty()) {
+            return out;
+        }
+        try {
+            String raw = request("GET", "/repos/" + owner + "/" + repo + "/contents/"
+                    + SyncPaths.ROOT_NAME, null);
+            return DeviceCatalog.parseContents(raw);
         } catch (ApiException e) {
             if (e.status == 404 || e.status == 409) {
-                return out;
+                return out != null ? out : new java.util.ArrayList<DeviceCatalog.Device>();
             }
             throw e;
         }
-        JSONArray arr;
-        try {
-            arr = new JSONArray(raw);
-        } catch (JSONException e) {
-            return out;
+    }
+
+    /** 只要标识的版本，内部走 {@link #listDeviceInfos()}。 */
+    public java.util.List<String> listDevices() throws IOException {
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        for (DeviceCatalog.Device d : listDeviceInfos()) {
+            out.add(d.id);
         }
-        for (int i = 0; i < arr.length(); i++) {
-            JSONObject o = arr.optJSONObject(i);
-            if (o == null) continue;
-            if (!"dir".equals(o.optString("type", ""))) continue;
-            String name = o.optString("name", "");
-            if (name.length() == 0 || "null".equals(name)) continue;
-            out.add(name);
-        }
-        java.util.Collections.sort(out);
         return out;
     }
 
     /**
      * 取设备的最新全量快照。优先 latest.sce；老仓库或手工清理过时回退到最新的日快照，
      * 两者内容口径相同（每次上传的都是全量），只是文件名不同。
+     *
+     * 传 dev 时直接用列目录时已经拿到的路径，省掉一次文件树请求。
      */
+    public byte[] downloadLatest(DeviceCatalog.Device dev) throws IOException {
+        if (dev == null) {
+            throw new ApiException(404, "没有指定设备");
+        }
+        if (dev.latestPath != null) {
+            return download(dev.latestPath);
+        }
+        if (dev.newestDayPath != null) {
+            return download(dev.newestDayPath);
+        }
+        throw new ApiException(404, "设备 " + dev.id + " 目录下没有 latest.sce，也没有日快照");
+    }
+
     public byte[] downloadLatest(String device) throws IOException {
         try {
             return download(SyncPaths.latest(device));

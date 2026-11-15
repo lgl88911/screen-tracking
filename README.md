@@ -125,10 +125,18 @@ devices/
     latest.sce             该设备最新一份
 ```
 
-**设备标识只定一次**。第一次打开应用会要求确定本机标识，两条路：
+**设备标识只定一次**。第一次打开应用（含重装后首次打开）会要求确定本机标识，两条路：
 
-- 这台手机第一次用 → 新建本机标识，按「机型 + 4 位随机后缀」生成（如 `22101320c-6f5a`）；
-- 重装应用 → 从仓库里列出已有设备目录，选中即沿用它，可顺手把该设备的历史快照拉回本机。
+- 重装应用 → 「从仓库恢复」：列出一份文件树即拿到仓库里的**全部设备**，每条带「N 天快照 · 最近 yyyy/MM/dd ·
+  体积」，选中哪台就用它的标识，并把这台设备的历史快照拉回本机；
+- 这台手机第一次用 → 新建本机标识，按「机型 + 4 位随机后缀」生成（如 `22101320c-6f5a`）。
+
+首次进来时仓库地址和 Token 还是空的，所以「从仓库恢复」会先弹一个就地填写的对话框，填完直接列设备，
+不必先去下面的输入框里保存一遍再回来点。
+
+设备列表走一次 `GET /git/trees/<branch>?recursive=1`，按 `devices/<标识>/` 前缀归并，
+日快照数量、最近一天、体积都从这次响应里算出来 —— 不按设备逐个列目录，设备多了也不会变成 N 次往返。
+树被 GitHub 截断时列出已看到的部分；空仓库（还没有任何提交）回退到 `contents/devices`，返回空列表而不报错。
 
 确定之后没有任何入口能改：换标识会让历史散在两个目录里，报表也就断了。
 只允许小写字母、数字、`-`、`_`，其它字符折叠成 `-`，清洗后为空则回退到 `phone-xxxx`。
@@ -179,14 +187,15 @@ CSV 带 BOM 的 UTF-8，Excel 直接打开不乱码。每次导出覆盖同名�
 ## 单测
 
 ```bash
-bash app/test/run.sh          # 事件重建 22 项 + 设备标识 31 项 + 快照导入 41 项
+bash app/test/run.sh          # 事件重建 22 + 设备标识 31 + 快照导入 41 + 仓库设备列表 21
 bash app/test/run_crypto.sh   # 三档加密封装 14 项，并在 /tmp/sce-test 留下跨语言验证样本
 ```
 
-`UsageAnalyzer`、`Crypto`、`SyncPaths`、`Json`、`SnapshotImporter` 都不引用 `android.*`，桌面 JDK 直接跑。
+`UsageAnalyzer`、`Crypto`、`SyncPaths`、`Json`、`SnapshotImporter`、`DeviceCatalog` 都不引用 `android.*`，桌面 JDK 直接跑。
 第一组覆盖跨午夜切分、灭屏/关机收口、末尾截断、启动去重、同时刻事件排序、乱序输入、空输入；
 第二组覆盖设备标识清洗（斜杠、点号、中文、超长截断）、多设备路径互不重叠、以及「绑定一次后任何输入都改不动」；
-第三组覆盖快照字段回退（缺 `foreground_ms` 按分钟算）、转义还原、聚合桶、合并方向判定与畸形 JSON。
+第三组覆盖快照字段回退（缺 `foreground_ms` 按分钟算）、转义还原、聚合桶、合并方向判定与畸形 JSON；
+第四组覆盖设备列表归并（目录项不算文件、大小写目录合为一台、位数不足的日期不算快照、截断树与空仓库）。
 
 `run_crypto.sh` 跑完可以用 `tools/decrypt.py` 解 `/tmp/sce-test/*.sce` 验证与 Python 侧互通。
 
@@ -205,6 +214,7 @@ app/
     Crypto.java               三档封装与解包（zip / PBKDF2 / AES-GCM / RSA-OAEP）
     GitHubClient.java         Contents/Git Data API：列设备、下载快照、六步原子提交
     SyncPaths.java            仓库路径、设备标识清洗与「只能绑一次」判定（可桌面单测）
+    DeviceCatalog.java        仓库文件树 → 设备列表（快照数 / 最近一天 / 体积，可桌面单测）
     SecretStore.java          Keystore 保护 Token 与密码派生 DEK
     SyncManager.java          同步编排：打包 → 加密 → 上传；下载 → 解密 → 导入
     SyncActivity.java         同步设置界面（标识只读、选设备、拉回历史）
@@ -212,7 +222,7 @@ app/
     SnapshotImporter.java     screentime.json → 可入库结构 + 合并方向判定（可桌面单测）
     AutoCollectService.java   JobService 后台快照 + 顺带同步
     MainActivity.java         单页界面（首次启动引导确定设备标识）
-  test/                       AnalyzerTest / CryptoTest / DeviceIdTest / ImportTest + run.sh
+  test/                       AnalyzerTest / CryptoTest / DeviceIdTest / ImportTest / DeviceCatalogTest + run.sh
 miui_install_confirm.py       MIUI 安装弹窗自动确认
 tools/gen_report.py           由 screentime.json 生成 report.html
 tools/genkeys.py              生成 RSA 密钥对（公钥加密模式）

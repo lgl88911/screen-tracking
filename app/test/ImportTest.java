@@ -188,7 +188,8 @@ public class ImportTest {
         check(name, ok, "断言失败");
     }
 
-    private static void check(String name, boolean ok, String detail) {        if (ok) {
+    private static void check(String name, boolean ok, String detail) {
+        if (ok) {
             pass++;
             System.out.println("  ok   " + name);
         } else {

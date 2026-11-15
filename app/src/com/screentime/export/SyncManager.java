@@ -311,8 +311,12 @@ public final class SyncManager {
         public UsageStore.ImportStat stat;
     }
 
-    /** 仓库里已有的设备目录，供首次绑定时挑选。 */
-    public static java.util.List<String> listRemoteDevices(Context ctx) throws IOException {
+    /**
+     * 仓库里已有的设备（带快照数、最近日期），供首次绑定时挑选。
+     * 未配置仓库或 Token 时抛 IOException，由界面引导用户补填。
+     */
+    public static java.util.List<DeviceCatalog.Device> listRemoteDevices(Context ctx)
+            throws IOException {
         Config cfg = load(ctx);
         String[] parts = GitHubClient.parseRepo(cfg.repo);
         if (parts == null) {
@@ -322,11 +326,18 @@ public final class SyncManager {
         if (token == null || token.length() == 0) {
             throw new IOException("未设置 Token");
         }
-        return new GitHubClient(token, parts[0], parts[1]).listDevices();
+        return new GitHubClient(token, parts[0], parts[1]).listDeviceInfos();
     }
 
     /** 只下载，不解密：密码模式常需要先看到文件才能决定要不要问密码。 */
     public static Pull download(Context ctx, String device) {
+        return download(ctx, device, null);
+    }
+
+    /**
+     * @param hint 列目录时已拿到的设备概况，可省一次文件树请求；为 null 时按标识自己查。
+     */
+    public static Pull download(Context ctx, String device, DeviceCatalog.Device hint) {
         Pull p = new Pull();
         Config cfg = load(ctx);
         String[] parts = GitHubClient.parseRepo(cfg.repo);
@@ -341,7 +352,7 @@ public final class SyncManager {
         }
         try {
             GitHubClient gh = new GitHubClient(token, parts[0], parts[1]);
-            p.sce = gh.downloadLatest(device);
+            p.sce = hint != null ? gh.downloadLatest(hint) : gh.downloadLatest(device);
             p.path = SyncPaths.latest(device);
             p.mode = Crypto.modeOf(p.sce);
             p.ok = true;
@@ -413,7 +424,12 @@ public final class SyncManager {
 
     /** 一步到位：下载 + 导入。密码模式未给密码时返回 needPassword。 */
     public static Pull pullNow(Context ctx, String device, String password) {
-        Pull d = download(ctx, device);
+        return pullNow(ctx, device, null, password);
+    }
+
+    public static Pull pullNow(Context ctx, String device, DeviceCatalog.Device hint,
+                               String password) {
+        Pull d = download(ctx, device, hint);
         if (!d.ok) {
             return d;
         }

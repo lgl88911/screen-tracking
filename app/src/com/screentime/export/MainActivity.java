@@ -141,12 +141,20 @@ public class MainActivity extends Activity {
         }
         final String suggest = SyncManager.suggestedDeviceId(this);
         new AlertDialog.Builder(this)
-                .setTitle("选择设备标识")
+                .setTitle("首次使用：确定设备标识")
                 .setMessage("每台手机在仓库里占一个目录，标识确定后不可修改。\n\n"
-                        + "· 这台手机第一次用：新建本机标识\n"
-                        + "· 重装应用：从仓库选择原有设备，可把历史数据拉回本机\n\n"
-                        + "建议标识：" + suggest)
-                .setPositiveButton("新建本机标识", new DialogInterface.OnClickListener() {
+                        + "· 重装应用：选「从仓库恢复」，会列出仓库里的全部设备，"
+                        + "选中哪台就用它的标识，并把这台设备的历史数据拉回本机\n"
+                        + "· 这台手机第一次用：新建本机标识\n\n"
+                        + "本机候选标识：" + suggest)
+                .setPositiveButton("从仓库恢复", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        startActivity(new Intent(MainActivity.this, SyncActivity.class)
+                                .putExtra(SyncActivity.EXTRA_PICK, true));
+                    }
+                })
+                .setNeutralButton("新建本机标识", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
                         if (SyncManager.bind(MainActivity.this, suggest)) {
@@ -154,13 +162,6 @@ public class MainActivity extends Activity {
                                     Toast.LENGTH_SHORT).show();
                             refreshStatus();
                         }
-                    }
-                })
-                .setNeutralButton("从仓库选择", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface d, int which) {
-                        startActivity(new Intent(MainActivity.this, SyncActivity.class)
-                                .putExtra(SyncActivity.EXTRA_PICK, true));
                     }
                 })
                 .setNegativeButton("稍后", null)
