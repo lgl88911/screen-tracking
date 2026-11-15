@@ -43,7 +43,7 @@ public class ReportActivity extends Activity {
     private LinearLayout chipRow;
     private TextView rangeLabel;
 
-    private int preset = 7;          // 7 / 30 / 0=全部 / -1=自定义
+    private int preset = 7;          // 1 / 7 / 30 / 0=全部 / -1=自定义
     private String from;
     private String to;
     private String selectedPkg;
@@ -134,6 +134,9 @@ public class ReportActivity extends Activity {
         if (first != null && from.compareTo(first) < 0 && preset != -1) {
             // 区间早于有数据的日期时，起点收到第一天，避免出现空档
             from = first;
+            if (preset == 1) {
+                to = first;
+            }
         }
     }
 
@@ -150,10 +153,39 @@ public class ReportActivity extends Activity {
             } finally {
                 store.close();
             }
+        } else if (p == 1) {
+            // 单日视图默认看今天；今天还没采集到数据就退到最近有数据的一天，
+            // 否则凌晨打开会看到一屏「这段时间没有数据」。
+            String day = today();
+            UsageStore store = new UsageStore(this);
+            try {
+                if (store.summary(day, day).dayCount == 0) {
+                    String last = store.lastDay();
+                    if (last != null) {
+                        day = last;
+                    }
+                }
+            } finally {
+                store.close();
+            }
+            from = day;
+            to = day;
         } else if (p > 0) {
             to = today();
             from = shift(to, -(p - 1));
         }
+        build();
+    }
+
+    /** 单日视图下前后翻一天，不超过今天。 */
+    private void stepDay(int delta) {
+        String d = shift(from, delta);
+        if (d.compareTo(today()) > 0) {
+            return;
+        }
+        from = d;
+        to = d;
+        selectedPkg = null;
         build();
     }
 
@@ -169,14 +201,20 @@ public class ReportActivity extends Activity {
                 Calendar p = Calendar.getInstance();
                 p.set(year, month, dayOfMonth, 0, 0, 0);
                 String d = F.format(p.getTime());
-                if (isFrom) {
+                if (preset == 1) {
+                    // 单日视图里选日期仍是单日，只是换一天
+                    from = d;
+                    to = d;
+                } else if (isFrom) {
                     from = d;
                     if (to != null && to.compareTo(from) < 0) to = from;
                 } else {
                     to = d;
                     if (from != null && from.compareTo(to) > 0) from = to;
                 }
-                preset = -1;
+                if (preset != 1) {
+                    preset = -1;
+                }
                 selectedPkg = null;
                 build();
             }
@@ -224,17 +262,17 @@ public class ReportActivity extends Activity {
         // ---- 范围切换
         chipRow = new LinearLayout(this);
         chipRow.setOrientation(LinearLayout.HORIZONTAL);
-        String[] names = {"7 天", "30 天", "全部", "自定义"};
-        final int[] vals = {7, 30, 0, -1};
+        String[] names = {"1 天", "7 天", "30 天", "全部", "自定义"};
+        final int[] vals = {1, 7, 30, 0, -1};
         for (int i = 0; i < names.length; i++) {
             final int p = vals[i];
             boolean on = (preset == p) || (p == -1 && preset == -1);
             TextView chip = text(names[i], 13, on ? Color.WHITE : INK, false);
             chip.setGravity(Gravity.CENTER);
-            chip.setPadding(dp(14), dp(7), dp(14), dp(7));
+            chip.setPadding(dp(12), dp(7), dp(12), dp(7));
             chip.setBackground(round(on ? ACCENT : CARD, 16, on ? ACCENT : LINE));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-            lp.rightMargin = dp(8);
+            lp.rightMargin = dp(6);
             chip.setLayoutParams(lp);
             chip.setOnClickListener(new View.OnClickListener() {
                 @Override
@@ -254,6 +292,11 @@ public class ReportActivity extends Activity {
         rangeLabel.setPadding(dp(2), dp(10), 0, dp(12));
         body.addView(rangeLabel);
 
+        // 单日视图给一组翻页控件，省得每次都去日期选择器里点
+        if (preset == 1) {
+            body.addView(dayNav());
+        }
+
         // 自定义范围下给出起点/终点两个可点按钮，否则只能改起点
         if (preset == -1) {
             LinearLayout dateRow = new LinearLayout(this);
@@ -270,31 +313,57 @@ public class ReportActivity extends Activity {
             List<UsageStore.AppTotal> apps = store.appTotals(from, to);
             List<UsageStore.DayRow> days = store.daysInRange(from, to);
 
-            rangeLabel.setText(from + " ~ " + to + "　·　有数据 " + sum.dayCount + " 天");
+            if (from.equals(to)) {
+                rangeLabel.setText(from + "　·　单日");
+            } else {
+                rangeLabel.setText(from + " ~ " + to + "　·　有数据 " + sum.dayCount + " 天");
+            }
 
             if (sum.dayCount == 0) {
                 LinearLayout c = card();
                 c.addView(text("这段时间没有数据", 15, INK, true));
-                c.addView(text("系统逐日记录只保留约 11 天，请先在首页采集。", 12, MUTED, false));
+                c.addView(text(preset == 1
+                        ? "用上方的翻页换一天看看，或先在首页采集。"
+                        : "系统逐日记录只保留约 11 天，请先在首页采集。", 12, MUTED, false));
                 body.addView(c);
                 return;
             }
 
             // ---- 总时间
             body.addView(sectionTitle("总时间"));
-            long avg = sum.dayCount > 0 ? sum.screenOnMs / sum.dayCount : 0;
-            LinearLayout row1 = new LinearLayout(this);
-            row1.setOrientation(LinearLayout.HORIZONTAL);
-            row1.addView(statCard("屏幕总时长", hhmm(sum.screenOnMs), "占区间每日累计"));
-            row1.addView(statCard("日均", hhmm(avg), "按有数据天数摊"));
-            body.addView(row1);
+            if (from.equals(to)) {
+                // 单日只有一天，「日均」等于总额，换成更有信息量的两张卡
+                LinearLayout r1 = new LinearLayout(this);
+                r1.setOrientation(LinearLayout.HORIZONTAL);
+                r1.addView(statCard("当日屏幕时长", hhmm(sum.screenOnMs), from));
+                r1.addView(statCard("解锁次数", sum.unlockCount + " 次", "单日累计"));
+                body.addView(r1);
 
-            LinearLayout row2 = new LinearLayout(this);
-            row2.setOrientation(LinearLayout.HORIZONTAL);
-            row2.addView(statCard("解锁次数", sum.unlockCount + " 次",
-                    sum.dayCount > 0 ? "日均 " + (sum.unlockCount / sum.dayCount) + " 次" : ""));
-            row2.addView(statCard("使用应用", apps.size() + " 个", "有前台记录的去重包名"));
-            body.addView(row2);
+                LinearLayout r2 = new LinearLayout(this);
+                r2.setOrientation(LinearLayout.HORIZONTAL);
+                r2.addView(statCard("使用应用", apps.size() + " 个", "有前台记录的去重包名"));
+                if (apps.isEmpty()) {
+                    r2.addView(statCard("最长应用", "—", "该日无应用记录"));
+                } else {
+                    UsageStore.AppTotal top = apps.get(0);
+                    r2.addView(statCard("最长应用", top.label, hhmm(top.foregroundMs)));
+                }
+                body.addView(r2);
+            } else {
+                long avg = sum.dayCount > 0 ? sum.screenOnMs / sum.dayCount : 0;
+                LinearLayout row1 = new LinearLayout(this);
+                row1.setOrientation(LinearLayout.HORIZONTAL);
+                row1.addView(statCard("屏幕总时长", hhmm(sum.screenOnMs), "占区间每日累计"));
+                row1.addView(statCard("日均", hhmm(avg), "按有数据天数摊"));
+                body.addView(row1);
+
+                LinearLayout row2 = new LinearLayout(this);
+                row2.setOrientation(LinearLayout.HORIZONTAL);
+                row2.addView(statCard("解锁次数", sum.unlockCount + " 次",
+                        sum.dayCount > 0 ? "日均 " + (sum.unlockCount / sum.dayCount) + " 次" : ""));
+                row2.addView(statCard("使用应用", apps.size() + " 个", "有前台记录的去重包名"));
+                body.addView(row2);
+            }
 
             // ---- 每日趋势
             if (days.size() > 1) {
@@ -315,7 +384,9 @@ public class ReportActivity extends Activity {
             body.addView(listCard);
 
             body.addView(text("时长口径：系统前台时长，由前台会话事件重建；跨午夜的会话按自然日切分。"
-                    + "点击任一行可看该应用在区间内的逐日明细。", 11, FAINT, false));
+                    + (from.equals(to)
+                    ? "点击任一行可看该应用在这一天的明细。"
+                    : "点击任一行可看该应用在区间内的逐日明细。"), 11, FAINT, false));
 
         } finally {
             store.close();
@@ -333,6 +404,62 @@ public class ReportActivity extends Activity {
         v.setBackgroundColor(Color.rgb(243, 243, 245));
         v.setLayoutParams(new LinearLayout.LayoutParams(-1, 1));
         return v;
+    }
+
+    /** 单日视图的翻页控件：前一天 / 当前日期（可点选）/ 后一天 */
+    private LinearLayout dayNav() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+        rlp.bottomMargin = dp(12);
+        row.setLayoutParams(rlp);
+
+        TextView prev = navBtn("‹ 前一天");
+        prev.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stepDay(-1);
+            }
+        });
+        row.addView(prev);
+
+        TextView cur = text(from, 13, INK, true);
+        cur.setGravity(Gravity.CENTER);
+        cur.setPadding(dp(10), dp(7), dp(10), dp(7));
+        cur.setBackground(round(CARD, 16, LINE));
+        cur.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickDate(true);
+            }
+        });
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
+        clp.leftMargin = dp(8);
+        clp.rightMargin = dp(8);
+        row.addView(cur, clp);
+
+        TextView next = navBtn("后一天 ›");
+        boolean canNext = from.compareTo(today()) < 0;
+        next.setAlpha(canNext ? 1f : 0.35f);
+        if (canNext) {
+            next.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    stepDay(1);
+                }
+            });
+        }
+        row.addView(next);
+        return row;
+    }
+
+    private TextView navBtn(String label) {
+        TextView t = text(label, 12, INK, false);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(12), dp(7), dp(12), dp(7));
+        t.setBackground(round(CARD, 16, LINE));
+        return t;
     }
 
     /** 起点/终点选择按钮 */
@@ -364,6 +491,8 @@ public class ReportActivity extends Activity {
         c.setLayoutParams(lp);
         c.addView(text(k, 11, MUTED, false));
         TextView val = text(v, 19, INK, true);
+        val.setSingleLine(true);
+        val.setEllipsize(android.text.TextUtils.TruncateAt.END);
         val.setPadding(0, dp(3), 0, 0);
         c.addView(val);
         if (sub != null && sub.length() > 0) {
@@ -492,9 +621,12 @@ public class ReportActivity extends Activity {
 
         List<UsageStore.DayApp> daily = store.appDaily(a.pkg, from, to);
 
+        boolean single = from.equals(to);
         long avg = a.activeDays > 0 ? a.foregroundMs / a.activeDays : 0;
         box.addView(text(a.pkg, 10, FAINT, false));
-        box.addView(text("累计 " + hhmm(a.foregroundMs) + "　·　日均 " + hhmm(avg), 11, INK, false));
+        box.addView(text(single
+                ? "当日 " + hhmm(a.foregroundMs)
+                : "累计 " + hhmm(a.foregroundMs) + "　·　日均 " + hhmm(avg), 11, INK, false));
         box.addView(text("启动 " + a.launches + " 次　·　活跃 " + a.activeDays + " 天", 11, MUTED, false));
 
         long max = 1;
