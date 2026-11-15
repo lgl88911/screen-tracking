@@ -1,0 +1,23 @@
+# 真实屏幕使用数据（绝不入库）
+# 用前导斜杠锚定根目录，避免误伤 app/src/com/screentime/export/
+/export/
+/report.html
+/docs/report-screen.png
+
+# 签名密钥与口令
+app/keystore/
+*.keystore
+*.jks
+*.p12
+
+# 构建产物
+app/build/
+*.apk
+*.dex
+*.class
+
+# 编辑器与系统
+.DS_Store
+*.swp
+.idea/
+.vscode/

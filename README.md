@@ -1,0 +1,160 @@
+# 屏幕时间导出（ScreentimeExport）
+
+从 Android 手机导出系统级屏幕使用历史数据。原生应用，无 root、无 Gradle、无第三方依赖。
+
+## 为什么需要装 App
+
+MIUI「屏幕时间管理」自己的历史库在 `com.xiaomi.misettings` 私有目录，只有 signature 级权限能读。可用的公开数据源是系统的
+`UsageStatsManager`：它保存逐日明细，但**系统只保留约 10 天**（实测 daily 文件 10 个，weekly 4 个，monthly 6 个，yearly 3 个）。
+
+所以「一次性导出全部历史」在无 root 前提下不存在。本 App 的做法是**累积**：
+
+1. 首次运行回溯 30 天（实际拿到系统还留着的约 11 天），把逐日结果写入自己的 SQLite，**按日期整日覆盖**（幂等，多跑几次自我纠正）；
+2. `JobScheduler` 每 6 小时后台跑一次（`setPersisted(true)`，重启后仍有效），把新数据固化；
+3. 装入之前的、已被系统清理的日期无法恢复 —— 这是 Android 的保留策略，无 root 无解。
+
+同时 App 会把系统自己的 weekly / monthly / yearly 聚合桶原样导出，这部分能回溯更远（本机 monthly 到 5 月，yearly 到 2024 年 8 月）。
+
+## 构建
+
+```bash
+bash app/build.sh          # 产出 app/build/screentime.apk
+```
+
+依赖：JDK 17（`~/jdk`）、`build-tools r34`（`~/android-sdk/android-14`）、`platform-33`（`~/android-sdk/android-13`）。
+构建链是 `aapt2 link → javac → d8 → 追加 classes.dex → zipalign → apksigner`，几个必须注意的点：
+
+- `javac` 要 `-bootclasspath $PLATFORM/android.jar -source 8 -target 8`
+- Java 8 lambda 在 d8 下会缺 metafactory，代码里一律用匿名内部类
+- `aapt2` 产出的 APK **不含 dex**，必须手工 `zip` 追加 `classes.dex`，否则报 `base.apk code is missing`
+- 容器内 JVM 需要 `_JAVA_OPTIONS="-Xmx256m -Xss512k"`，否则 `pthread_create failed`
+- 仓库所在文件系统不支持原地 rename，签名必须落在 `/tmp` 暂存区（build.sh 已处理）
+
+## 安装与授权
+
+```bash
+export ADB_LIBUSB=1                       # 本机 adb 必须开 libusb 后端才认设备
+python3 miui_install_confirm.py app/build/screentime.apk   # 自动点掉 MIUI「继续安装」弹窗
+adb shell appops set com.screentime.export GET_USAGE_STATS allow
+```
+
+`appops` 这一句是关键：shell 可以直接给第三方应用授予「使用情况访问」，不需要到设置里手点。
+
+## 使用
+
+打开「屏幕时间导出」：
+
+- **采集并导出** —— 拉事件流、重建、入库、导出 5 个文件
+- **查看使用报告** —— 按时间段看屏幕使用情况，见下节
+- **开启后台自动采集** —— 排一个每 6 小时的可持久 Job
+- 打开应用时若距上次采集超过 6 小时，会**静默补采**（只入库、不导出），状态区提示「已静默补采」
+- 状态区显示覆盖区间、累计屏幕时长、上次采集时间
+
+## 数据查看（按时间段出报表）
+
+首页点「查看使用报告（可按时间段筛选）」进入 `ReportActivity`，不依赖数据库之外的东西，查库是毫秒级。
+
+进入后按 `7 天` / `30 天` / `全部` / `自定义` 切换统计范围，内容分总时间、每日时长、应用排名三块。
+起点早于库里第一天时自动收到第一天，避免出现空档。
+
+**三块内容**（对应需求里的总时间 / 排名时间 / 指定应用时间）：
+
+| 区块 | 内容 |
+|---|---|
+| 总时间 | 屏幕总时长、日均、解锁次数（含日均）、使用应用数 |
+| 每日屏幕时长 | 区间内每天的竖条图，标注分钟数与日期，一眼看出波动 |
+| 排名时间 | 应用按时长降序，含条形、时长、占屏幕总时长百分比 |
+| 指定应用时间 | **点任一行展开**：包名、累计、日均（按活跃天数）、启动次数、活跃天数，以及该应用逐日时长条形 |
+
+口径与导出文件一致：系统前台时长、跨午夜按自然日切分、启动次数按前台会话计数。
+`ReportActivity` 未导出（`android:exported="false"`），只能从 App 内进入，`adb shell am start` 会被 Permission Denial 拒绝。
+
+导出同时写两个位置：
+
+- `下载/ScreentimeExport/` —— MediaStore 公共目录，手机端文件管理器可见
+- `/sdcard/Android/data/com.screentime.export/files/exports/` —— 供 `adb pull`
+
+```bash
+adb pull /sdcard/Android/data/com.screentime.export/files/exports/ ./export/
+```
+
+## 保留多久
+
+| 类别 | 上限 | 说明 |
+|---|---|---|
+| 逐日明细（本应用自己的库） | **无上限** | 只要 App 不卸载、不清数据，就一直累积 |
+| 单次能回溯 | **约 11 天** | 系统只留 10 个 daily 文件 + 今天，装 App 之前且已被清理的日期无解 |
+| weekly / monthly / yearly 聚合 | 本机实测回 **2026-05**、**2024-08** | 系统每类只留几个桶，靠本应用滚动累积不会再丢 |
+
+决定「会不会断档」的是采集频率，不是存储：系统窗口 11 天，只要超过 11 天没采集，中间那段就永久丢失。
+所以应用做了两层兜底 —— 每 6 小时的后台 Job，以及**每次打开 App 时若距上次采集超过 6 小时就静默补采**（不导出文件）。
+后台 Job 被 MIUI 省电策略掐掉时，只要你偶尔打开一次 App 就不会断档。
+
+存储开销：约 35 行/天、每年约 1.3 万行，十年也不过几 MB，可以忽略。
+
+导出文件用**固定文件名**（永远是当前全量快照），不会因反复导出而堆文件；历史累积在数据库里而不是文件多版本里。
+
+## 导出文件
+
+| 文件 | 内容 |
+|---|---|
+| `screentime.json` | 全量：元数据 + totals + 逐日逐应用 + 四类周期聚合 |
+| `daily_summary.csv` | 每天一行：屏幕时长、解锁次数、使用应用数、使用最多的应用 |
+| `app_daily.csv` | 逐日逐应用：时长、启动次数、最后使用时间 |
+| `app_total.csv` | 应用维度汇总：累计时长、活跃天数、日均、启动次数 |
+| `aggregates.csv` | 系统自己的 daily/weekly/monthly/yearly 桶，原样输出 |
+
+CSV 带 BOM 的 UTF-8，Excel 直接打开不乱码。每次导出覆盖同名文件，`screentime.json` 里的 `exported_at` 标明导出时刻。
+
+`bash tools/gen_report.py` 由 `screentime.json` 生成 `report.html` 可视化概览。
+
+## 数据口径（重要）
+
+1. **时长来源**：由 `queryEvents` 的 `ACTIVITY_RESUMED / PAUSED / SCREEN_INTERACTIVE / SCREEN_NON_INTERACTIVE / KEYGUARD_HIDDEN / DEVICE_SHUTDOWN` 事件重建前台会话，规则见 `UsageAnalyzer`：
+   灭屏、关机、采集时刻都要收口；跨午夜的会话按自然日切分。
+2. **启动次数**取「前台会话数」口径：相邻事件包名变化，或同包名间隔 > 60 秒才算一次。直接数 `ACTIVITY_RESUMED`
+   会把应用内页面切换也算进去（微信能到 200 多次），严重偏高。
+3. **日界可能不是本地零点**：部分机型的系统「日」桶起点与零点有偏移（`getFirstTimeStamp()` 实测可达数小时），
+   此时系统 daily 统计的内容与「自该起点起」的事件重建吻合。
+   App 的 `days` 按本地自然日切分，`aggregates` 保留系统原样桶，JSON 里 `system_daily_bucket_start` 给出该起点，便于和手机自带屏幕时间对账。
+4. **与 MIUI 屏幕时间界面不保证逐秒一致**：MIUI 会做自己的平滑、合并与系统应用过滤，且只统计它认定的「应用」。
+
+## 单测
+
+```bash
+bash app/test/run.sh
+```
+
+`UsageAnalyzer` 不引用 `android.*`，桌面 JDK 直接跑，覆盖跨午夜切分、灭屏/关机收口、末尾截断、启动去重、
+同时刻事件排序、乱序输入、空输入等 22 个断言。
+
+## 目录
+
+```
+app/
+  AndroidManifest.xml
+  build.sh                    手工构建链
+  src/com/screentime/export/
+    UsageAnalyzer.java        纯 Java 事件流重建（可桌面单测）
+    UsageStore.java           SQLite 累积存储，整日覆盖合并
+    Collector.java            查询 UsageStats、补中文名、落库
+    Exporter.java             JSON + 4 份 CSV，MediaStore / 外部目录双写
+    ReportActivity.java       按时间段查看报表（总时间 / 排名 / 指定应用）
+    AutoCollectService.java   JobService 后台快照
+    MainActivity.java         单页界面
+  test/                       AnalyzerTest + run.sh
+miui_install_confirm.py       MIUI 安装弹窗自动确认
+tools/gen_report.py           由 screentime.json 生成 report.html
+docs/sync-design.md           同步到私有仓库的方案设计（加密 + GitHub API）
+```
+
+下列内容含真实使用数据或签名密钥，已在 `.gitignore` 中排除，不会进入版本库：
+
+```
+export/                       从手机拉回的导出结果（含真实应用与时长）
+report.html                   由导出数据生成的可视化报告
+app/keystore/                 签名密钥与口令文件
+app/build/                    构建产物
+```
+
+克隆仓库后需要自行执行一次「采集并导出」才会产生 `export/` 与 `report.html`。
