@@ -16,3 +16,11 @@ OUT2="$(mktemp -d /tmp/st-path.XXXXXX)"
     "$APP_DIR/src/com/screentime/export/SyncPaths.java" \
     "$APP_DIR/test/DeviceIdTest.java"
 "$JDK/bin/java" -cp "$OUT2" DeviceIdTest
+
+# 快照导入：Json + SnapshotImporter 都不依赖 android.*
+OUT3="$(mktemp -d /tmp/st-import.XXXXXX)"
+"$JDK/bin/javac" -encoding UTF-8 -d "$OUT3" \
+    "$APP_DIR/src/com/screentime/export/Json.java" \
+    "$APP_DIR/src/com/screentime/export/SnapshotImporter.java" \
+    "$APP_DIR/test/ImportTest.java"
+"$JDK/bin/java" -cp "$OUT3" ImportTest

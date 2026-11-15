@@ -23,13 +23,20 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
-/** 同步配置页：仓库、Token、三档加密模式、立即同步。 */
+/** 同步配置页：仓库、Token、三档加密模式、设备标识绑定、立即同步。 */
 public class SyncActivity extends Activity {
+
+    /** 主界面「从仓库选择已有设备」跳过来时带上，进来就弹选择框。 */
+    public static final String EXTRA_PICK = "pick";
 
     private static final int ID_BASE = 1000;
 
     private EditText repoField;
-    private EditText deviceField;
+    private TextView deviceValue;
+    private TextView deviceMeta;
+    private Button bindNewBtn;
+    private Button pickBtn;
+    private Button pullBtn;
     private EditText tokenField;
     private EditText pwField;
     private EditText pubKeyField;
@@ -67,10 +74,55 @@ public class SyncActivity extends Activity {
         repoField.setSingleLine(true);
         root.addView(repoField, lp(-1, dp(46)));
 
-        root.addView(label("设备标识（本机在仓库里的目录名，多设备靠它区分）"), lp(-1, -2));
-        deviceField = input("留空则按机型自动生成");
-        deviceField.setSingleLine(true);
-        root.addView(deviceField, lp(-1, dp(46)));
+        root.addView(label("设备标识（本机在仓库里的目录名，确定后不可修改）"), lp(-1, -2));
+        deviceValue = new TextView(this);
+        deviceValue.setTextSize(16);
+        deviceValue.setTextColor(Color.rgb(25, 25, 25));
+        deviceValue.setTypeface(android.graphics.Typeface.MONOSPACE);
+        deviceValue.setPadding(dp(4), dp(4), dp(4), dp(2));
+        deviceValue.setTextIsSelectable(true);
+        root.addView(deviceValue, lp(-1, -2));
+
+        deviceMeta = new TextView(this);
+        deviceMeta.setTextSize(12);
+        deviceMeta.setTextColor(Color.rgb(130, 130, 130));
+        deviceMeta.setPadding(dp(4), 0, dp(4), dp(10));
+        root.addView(deviceMeta, lp(-1, -2));
+
+        bindNewBtn = new Button(this);
+        bindNewBtn.setAllCaps(false);
+        bindNewBtn.setTextSize(13);
+        bindNewBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                bindNew();
+            }
+        });
+        root.addView(bindNewBtn, lp(-1, dp(42)));
+
+        pickBtn = new Button(this);
+        pickBtn.setText("从仓库选择已有设备");
+        pickBtn.setAllCaps(false);
+        pickBtn.setTextSize(13);
+        pickBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickRemoteDevice();
+            }
+        });
+        root.addView(pickBtn, lp(-1, dp(42)));
+
+        pullBtn = new Button(this);
+        pullBtn.setText("从仓库下载本机历史数据");
+        pullBtn.setAllCaps(false);
+        pullBtn.setTextSize(13);
+        pullBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                runPull(null, null);
+            }
+        });
+        root.addView(pullBtn, lp(-1, dp(42)));
 
         root.addView(label("Token（fine-grained，仅需该仓库 Contents 读写）"), lp(-1, -2));        tokenField = input("留空则不修改已保存的 Token");
         tokenField.setSingleLine(true);
@@ -144,6 +196,16 @@ public class SyncActivity extends Activity {
         setContentView(sv);
 
         loadConfig();
+
+        if (getIntent() != null && getIntent().getBooleanExtra(EXTRA_PICK, false)
+                && !SyncManager.isBound(this)) {
+            ui.post(new Runnable() {
+                @Override
+                public void run() {
+                    pickRemoteDevice();
+                }
+            });
+        }
     }
 
     @Override
@@ -157,9 +219,8 @@ public class SyncActivity extends Activity {
     private void loadConfig() {
         SyncManager.Config c = SyncManager.load(this);
         repoField.setText(c.repo);
-        // 未设置过就按机型生成一次并固定，避免每次同步换目录
-        deviceField.setText(SyncManager.deviceId(this));
         pubKeyField.setText(c.publicKeyB64);
+        refreshDeviceSection();
         // hint 每次都要按实际状态重设，否则清除凭据后界面仍显示「已保存」
         tokenField.setHint(SyncManager.getToken(this) != null
                 ? "已保存，留空则不修改" : "留空则不修改已保存的 Token");
@@ -183,19 +244,6 @@ public class SyncActivity extends Activity {
             return;
         }
         SyncManager.setRepo(this, repo);
-
-        String dev = deviceField.getText().toString().trim();
-        if (dev.length() > 0) {
-            String clean = SyncManager.sanitizeDeviceId(dev);
-            if (clean == null) {
-                toast("设备标识不能为空，只能用字母、数字、- 和 _");
-                return;
-            }
-            if (!clean.equals(dev)) {
-                deviceField.setText(clean);
-            }
-            SyncManager.setDeviceId(this, clean);
-        }
 
         String token = tokenField.getText().toString().trim();
         if (token.length() > 0) {
@@ -253,6 +301,209 @@ public class SyncActivity extends Activity {
         refreshStatus();
     }
 
+    // ------------------------------------------------------------ 设备标识
+
+    private void refreshDeviceSection() {
+        boolean bound = SyncManager.isBound(this);
+        String id = SyncManager.deviceId(this);
+        deviceValue.setText(id);
+        if (bound) {
+            deviceMeta.setText("已锁定，此后不可修改。仓库目录 " + SyncPaths.deviceDir(id));
+        } else {
+            deviceMeta.setText("尚未确定。这台手机第一次用选「新建」，重装应用选「从仓库选择」以接上原有历史。");
+        }
+        bindNewBtn.setText("用本机新标识：" + SyncManager.suggestedDeviceId(this));
+        bindNewBtn.setVisibility(bound ? View.GONE : View.VISIBLE);
+        pickBtn.setVisibility(bound ? View.GONE : View.VISIBLE);
+        pullBtn.setVisibility(bound ? View.VISIBLE : View.GONE);
+    }
+
+    private void bindNew() {
+        final String id = SyncManager.suggestedDeviceId(this);
+        new AlertDialog.Builder(this)
+                .setTitle("确定用这个标识？")
+                .setMessage("设备标识：" + id
+                        + "\n\n确定后不能再修改。此后所有采集数据都会写进仓库的 "
+                        + SyncPaths.deviceDir(id) + " 目录。")
+                .setPositiveButton("确定", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        if (SyncManager.bind(SyncActivity.this, id)) {
+                            toast("已绑定 " + id);
+                            refreshDeviceSection();
+                            refreshStatus();
+                        } else {
+                            toast("绑定失败：标识已被占用或不合规");
+                        }
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** 列出仓库里已有的设备目录，选中即绑定；可选同时把历史快照拉回本机。 */
+    private void pickRemoteDevice() {
+        if (busy) {
+            return;
+        }
+        if (!SyncManager.load(this).hasRepo()) {
+            toast("先填写仓库地址并保存");
+            return;
+        }
+        if (SyncManager.getToken(this) == null) {
+            toast("先填写 Token 并保存");
+            return;
+        }
+        busy = true;
+        pickBtn.setEnabled(false);
+        status.setText("正在读取仓库里的设备目录…");
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final java.util.List<String> devs = new java.util.ArrayList<String>();
+                String err = null;
+                try {
+                    devs.addAll(SyncManager.listRemoteDevices(SyncActivity.this));
+                } catch (Throwable t) {
+                    err = t.getMessage() == null ? t.toString() : t.getMessage();
+                }
+                final String fErr = err;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        busy = false;
+                        pickBtn.setEnabled(true);
+                        if (fErr != null) {
+                            status.setText("读取失败\n" + fErr);
+                            toast("读取失败");
+                            return;
+                        }
+                        if (devs.isEmpty()) {
+                            status.setText("仓库里还没有任何设备目录。\n这是第一次上传，用「新建」即可。");
+                            toast("仓库里没有可选的设备");
+                            return;
+                        }
+                        showDeviceChooser(devs);
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void showDeviceChooser(final java.util.List<String> devs) {
+        status.setText("仓库里共 " + devs.size() + " 个设备目录");
+        new AlertDialog.Builder(this)
+                .setTitle("选择已有设备")
+                .setItems(devs.toArray(new String[devs.size()]),
+                        new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface d, int which) {
+                                confirmBindExisting(devs.get(which));
+                            }
+                        })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void confirmBindExisting(final String dev) {
+        new AlertDialog.Builder(this)
+                .setTitle(dev)
+                .setMessage("绑定为该设备后不可修改，之后本机的采集都会继续写进这个目录。\n\n"
+                        + "现在是否同时把它在仓库里的最新快照下载到本机？")
+                .setPositiveButton("绑定并下载", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        if (doBind(dev)) {
+                            runPull(null, null);
+                        }
+                    }
+                })
+                .setNegativeButton("仅绑定", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        doBind(dev);
+                    }
+                })
+                .show();
+    }
+
+    private boolean doBind(String dev) {
+        if (!SyncManager.bind(this, dev)) {
+            toast("绑定失败");
+            return false;
+        }
+        toast("已绑定 " + dev);
+        refreshDeviceSection();
+        refreshStatus();
+        return true;
+    }
+
+    // ------------------------------------------------------------ 拉回历史
+
+    private void runPull(final String password, final SyncManager.Pull retry) {
+        if (busy) {
+            return;
+        }
+        if (!SyncManager.isBound(this)) {
+            toast("先确定设备标识");
+            return;
+        }
+        busy = true;
+        pullBtn.setEnabled(false);
+        status.setText(retry == null ? "正在下载并导入…" : "正在解密并导入…");
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String device = SyncManager.deviceId(SyncActivity.this);
+                final SyncManager.Pull p = retry == null
+                        ? SyncManager.pullNow(SyncActivity.this, device, password)
+                        : SyncManager.unpack(SyncActivity.this, retry, password);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        busy = false;
+                        pullBtn.setEnabled(true);
+                        if (p.needPassword) {
+                            status.setText("该设备的数据用密码加密。");
+                            askPassword(p);
+                            return;
+                        }
+                        toast(p.ok ? "历史数据已导入" : "导入失败");
+                        // 先刷新状态再追加结果：refreshStatus 会整段重写，顺序反了就看不到导入结果
+                        refreshStatus();
+                        status.setText(status.getText() + "\n\n"
+                                + (p.ok ? "导入结果\n" : "导入失败\n") + p.message);
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void askPassword(final SyncManager.Pull pending) {
+        final EditText input = input("上传时使用的密码");
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        new AlertDialog.Builder(this)
+                .setTitle("输入密码")
+                .setMessage("仓库里的快照是密码模式，需要当时的密码才能解开。")
+                .setView(input)
+                .setPositiveButton("解密导入", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        String pw = input.getText().toString();
+                        if (pw.length() == 0) {
+                            toast("密码不能为空");
+                            return;
+                        }
+                        runPull(pw, pending);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     // ------------------------------------------------------------ 同步
 
     private void startSync() {
@@ -265,6 +516,10 @@ public class SyncActivity extends Activity {
         }
         if (SyncManager.getToken(this) == null) {
             toast("先填写 Token 并保存");
+            return;
+        }
+        if (!SyncManager.isBound(this)) {
+            toast("先确定设备标识：新建，或从仓库选择已有设备");
             return;
         }
         int mode = SyncManager.load(this).mode;
@@ -326,8 +581,14 @@ public class SyncActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         sb.append("当前模式：").append(SyncManager.modeName(c.mode)).append('\n');
         sb.append("仓库：").append(c.repo.length() == 0 ? "未设置" : c.repo).append('\n');
-        sb.append("设备目录：").append(SyncPaths.deviceDir(SyncManager.deviceId(this)))
-                .append('\n');
+        if (SyncManager.isBound(this)) {
+            String id = SyncManager.deviceId(this);
+            sb.append("设备标识：").append(id).append("（已锁定）\n");
+            sb.append("设备目录：").append(SyncPaths.deviceDir(id)).append('\n');
+        } else {
+            sb.append("设备标识：未确定（候选 ").append(SyncManager.suggestedDeviceId(this))
+                    .append("，也可从仓库选择已有设备）\n");
+        }
         sb.append("Token：").append(SyncManager.getToken(this) == null ? "未设置" : "已保存").append('\n');
         if (ok > 0) {
             sb.append("上次成功：").append(ago(ok)).append("（")

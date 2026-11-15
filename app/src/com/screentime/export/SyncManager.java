@@ -25,6 +25,8 @@ public final class SyncManager {
     public static final String K_MODE = "mode";
     public static final String K_PUBKEY = "pubkey";
     public static final String K_DEVICE = "device";
+    public static final String K_DEVICE_LOCKED = "device_locked";
+    public static final String K_SUGGEST = "device_suggest";
     public static final String K_LAST_OK = "last_ok";
     public static final String K_LAST_ERR = "last_err";
     public static final String K_LAST_TRY = "last_try";
@@ -78,23 +80,54 @@ public final class SyncManager {
 
     /**
      * 仓库内每台设备一个目录，避免多设备互相覆盖 latest.sce。
-     * 未设置时按机型加随机后缀生成一次并固定下来。
+     *
+     * 标识只确定一次：新装后由用户选择「新建本机标识」或「沿用仓库里已有的设备」，
+     * 确定即写入 K_DEVICE 并锁死，之后没有任何入口能改 —— 一旦允许改，
+     * 历史就会散在两个目录里，报表也就断了。
      */
-    public static String deviceId(Context ctx) {
-        SharedPreferences p = prefs(ctx);
-        String d = sanitizeDeviceId(p.getString(K_DEVICE, ""));
-        if (d == null) {
-            d = defaultDeviceId();
-            p.edit().putString(K_DEVICE, d).apply();
-        }
-        return d;
+    public static boolean isBound(Context ctx) {
+        return sanitizeDeviceId(prefs(ctx).getString(K_DEVICE, "")) != null;
     }
 
-    public static void setDeviceId(Context ctx, String raw) {
-        String d = sanitizeDeviceId(raw);
-        if (d != null) {
-            prefs(ctx).edit().putString(K_DEVICE, d).apply();
+    /** 当前标识。未绑定时返回建议值（只用于界面展示，不算已绑定）。 */
+    public static String deviceId(Context ctx) {
+        String d = sanitizeDeviceId(prefs(ctx).getString(K_DEVICE, ""));
+        return d != null ? d : suggestedDeviceId(ctx);
+    }
+
+    /**
+     * 建议标识：机型名 + 4 位随机后缀。单独存一份，
+     * 否则界面每刷新一次就换一个名字，用户没法确认自己要绑的是哪个。
+     */
+    public static String suggestedDeviceId(Context ctx) {
+        String s = sanitizeDeviceId(prefs(ctx).getString(K_SUGGEST, ""));
+        if (s == null) {
+            s = defaultDeviceId();
+            prefs(ctx).edit().putString(K_SUGGEST, s).apply();
         }
+        return s;
+    }
+
+    /**
+     * 绑定设备标识。已绑定过就拒绝，返回 false —— 这是「不能修改」的唯一闸口，
+     * 界面上不提供入口之外，方法本身也不允许二次调用成功。
+     */
+    public static boolean bind(Context ctx, String raw) {
+        String d = SyncPaths.bindable(prefs(ctx).getString(K_DEVICE, ""), raw);
+        if (d == null) {
+            return false;
+        }
+        prefs(ctx).edit()
+                .putString(K_DEVICE, d)
+                .putBoolean(K_DEVICE_LOCKED, true)
+                .remove(K_SUGGEST)
+                .apply();
+        return true;
+    }
+
+    /** 老版本升级上来的没有 K_DEVICE_LOCKED，但有标识就算锁定：行为与新版一致。 */
+    public static boolean isLocked(Context ctx) {
+        return isBound(ctx) && prefs(ctx).getBoolean(K_DEVICE_LOCKED, true);
     }
 
     /** 名称清洗规则在 SyncPaths 里，那边不依赖 android，可桌面单测。 */
@@ -208,6 +241,11 @@ public final class SyncManager {
         if (token == null || token.length() == 0) {
             return fail(ctx, r, "未设置 Token");
         }
+        // 未绑定就先拒绝：后台自动采集也会走到这里，若顺手生成了新标识，
+        // 用户就再也没机会指回仓库里原有的设备目录了。
+        if (!isBound(ctx)) {
+            return fail(ctx, r, "尚未确定设备标识，请到同步设置里选择本机标识或仓库中的已有设备");
+        }
         String device = deviceId(ctx);
         r.device = device;
 
@@ -260,6 +298,162 @@ public final class SyncManager {
         }
     }
 
+    // ------------------------------------------------------------ 从仓库拉回
+
+    public static class Pull {
+        public boolean ok;
+        /** 快照是密码模式，但没有可用的 DEK/密码，需要界面再问一次。 */
+        public boolean needPassword;
+        public String message = "";
+        public String path = "";
+        public int mode = -1;
+        public byte[] sce;
+        public UsageStore.ImportStat stat;
+    }
+
+    /** 仓库里已有的设备目录，供首次绑定时挑选。 */
+    public static java.util.List<String> listRemoteDevices(Context ctx) throws IOException {
+        Config cfg = load(ctx);
+        String[] parts = GitHubClient.parseRepo(cfg.repo);
+        if (parts == null) {
+            throw new IOException("仓库地址无效，应形如 owner/repo");
+        }
+        String token = getToken(ctx);
+        if (token == null || token.length() == 0) {
+            throw new IOException("未设置 Token");
+        }
+        return new GitHubClient(token, parts[0], parts[1]).listDevices();
+    }
+
+    /** 只下载，不解密：密码模式常需要先看到文件才能决定要不要问密码。 */
+    public static Pull download(Context ctx, String device) {
+        Pull p = new Pull();
+        Config cfg = load(ctx);
+        String[] parts = GitHubClient.parseRepo(cfg.repo);
+        if (parts == null) {
+            p.message = "仓库地址无效，应形如 owner/repo";
+            return p;
+        }
+        String token = getToken(ctx);
+        if (token == null || token.length() == 0) {
+            p.message = "未设置 Token";
+            return p;
+        }
+        try {
+            GitHubClient gh = new GitHubClient(token, parts[0], parts[1]);
+            p.sce = gh.downloadLatest(device);
+            p.path = SyncPaths.latest(device);
+            p.mode = Crypto.modeOf(p.sce);
+            p.ok = true;
+            return p;
+        } catch (Throwable t) {
+            p.message = friendlyPull(t);
+            return p;
+        }
+    }
+
+    /**
+     * 解密 + 解析 + 入库。已下载的字节留在 Pull 里，密码问完可以直接重入，不必再下一次。
+     */
+    public static Pull unpack(Context ctx, Pull p, String password) {
+        if (p == null || !p.ok || p.sce == null) {
+            Pull bad = new Pull();
+            bad.message = p == null ? "没有待处理的数据" : p.message;
+            return bad;
+        }
+        Pull out = new Pull();
+        out.path = p.path;
+        out.sce = p.sce;
+        out.mode = p.mode;
+
+        byte[] payload;
+        try {
+            payload = payloadOf(ctx, p, password);
+        } catch (NeedPasswordException e) {
+            out.needPassword = true;
+            out.message = e.getMessage();
+            return out;
+        } catch (Throwable t) {
+            out.message = t.getMessage() == null ? "解密失败" : t.getMessage();
+            return out;
+        }
+
+        try {
+            java.util.Map<String, byte[]> files = Crypto.unzip(payload);
+            byte[] json = files.get("screentime.json");
+            if (json == null) {
+                out.message = "快照里没有 screentime.json，可能不是本应用导出的包";
+                return out;
+            }
+            SnapshotImporter.Snapshot snap = SnapshotImporter.parse(json);
+            if (snap.days.isEmpty()) {
+                out.message = "快照里没有逐日数据";
+                return out;
+            }
+            UsageStore store = new UsageStore(ctx);
+            try {
+                out.stat = store.importSnapshot(snap);
+            } finally {
+                store.close();
+            }
+            int total = out.stat.daysNew + out.stat.daysUpdated;
+            if (total == 0) {
+                out.message = "本地已有同样或更新的数据，无需导入（快照 " + snap.days.size()
+                        + " 天全部不比本地新）";
+            } else {
+                out.message = out.stat.describe();
+            }
+            out.ok = true;
+            return out;
+        } catch (Throwable t) {
+            out.message = "导入失败：" + t;
+            return out;
+        }
+    }
+
+    /** 一步到位：下载 + 导入。密码模式未给密码时返回 needPassword。 */
+    public static Pull pullNow(Context ctx, String device, String password) {
+        Pull d = download(ctx, device);
+        if (!d.ok) {
+            return d;
+        }
+        return unpack(ctx, d, password);
+    }
+
+    private static class NeedPasswordException extends Exception {
+        NeedPasswordException(String msg) {
+            super(msg);
+        }
+    }
+
+    private static byte[] payloadOf(Context ctx, Pull p, String password)
+            throws GeneralSecurityException, IOException, NeedPasswordException {
+        if (p.mode == Crypto.MODE_PLAIN) {
+            return Crypto.open(p.sce, null, null);
+        }
+        if (p.mode == Crypto.MODE_PASSWORD) {
+            // 本机设置过同一密码时直接用缓存的 DEK，免掉一次 21 万轮 PBKDF2
+            String dekB64 = SecretStore.get(ctx, S_DEK);
+            if (dekB64 != null) {
+                try {
+                    return Crypto.openWithDek(p.sce, Base64.decode(dekB64, Base64.NO_WRAP));
+                } catch (GeneralSecurityException ignore) {
+                    // DEK 对不上（换了密码或这是别的设备的数据），继续走密码分支
+                }
+            }
+            if (password == null || password.length() == 0) {
+                throw new NeedPasswordException("该设备的数据用密码加密，请输入当时的密码");
+            }
+            return Crypto.open(p.sce, password.toCharArray(), null);
+        }
+        if (p.mode == Crypto.MODE_KEY) {
+            throw new GeneralSecurityException(
+                    "该设备的数据用公钥加密，私钥只在电脑上，手机无法解密。"
+                            + "请用 tools/decrypt.py 在电脑上解开后再导入");
+        }
+        throw new GeneralSecurityException("未知的加密模式: " + p.mode);
+    }
+
     private static byte[] seal(Context ctx, Config cfg, byte[] payload)
             throws GeneralSecurityException, IOException {
         if (cfg.mode == Crypto.MODE_PASSWORD) {
@@ -298,6 +492,17 @@ public final class SyncManager {
             return m;
         }
         return "上传失败：" + m;
+    }
+
+    private static String friendlyPull(Throwable t) {
+        String m = t.getMessage();
+        if (m == null || m.length() == 0) {
+            m = t.getClass().getSimpleName();
+        }
+        if (t instanceof GitHubClient.ApiException) {
+            return m;
+        }
+        return "下载失败：" + m;
     }
 
     private static String shortSha(String sha) {

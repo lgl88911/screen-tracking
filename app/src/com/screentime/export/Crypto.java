@@ -238,6 +238,25 @@ public final class Crypto {
         throw new GeneralSecurityException("未知的加密模式: " + mode);
     }
 
+    /**
+     * 用已经缓存的 DEK 解开密码模式的文件。本机设置过同一密码时走这里，
+     * 省掉一次 21 万轮 PBKDF2；解不开（换了密码或换了设备）再退回 {@link #open} 用密码算。
+     */
+    public static byte[] openWithDek(byte[] sce, byte[] dek) throws GeneralSecurityException {
+        if (dek == null || dek.length != DEK_LEN) {
+            throw new GeneralSecurityException("DEK 长度不对");
+        }
+        checkMagic(sce);
+        int mode = sce[MAGIC.length] & 0xFF;
+        if (mode != MODE_PASSWORD) {
+            throw new GeneralSecurityException("该文件不是密码模式");
+        }
+        int p = MAGIC.length + 1;
+        int saltLen = sce[p] & 0xFF;
+        p += 1 + saltLen + 4;         // saltLen + salt + iter
+        return openGcm(sce, p, dek);
+    }
+
     private static byte[] openGcm(byte[] sce, int off, byte[] dek)
             throws GeneralSecurityException {
         if (off + IV_LEN >= sce.length) {

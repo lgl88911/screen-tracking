@@ -1,8 +1,10 @@
 package com.screentime.export;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.usage.UsageStatsManager;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -124,6 +126,45 @@ public class MainActivity extends Activity {
         setContentView(sv);
 
         refreshStatus();
+        maybeGuideDevice();
+    }
+
+    /**
+     * 首次使用（含重装后数据被清空）先确定设备标识。
+     *
+     * 这一步必须挡在采集之前：标识一旦定下来就不能改，若等到后台自动同步时
+     * 才顺手生成，用户就再没机会指回仓库里原有的设备目录。
+     */
+    private void maybeGuideDevice() {
+        if (SyncManager.isBound(this)) {
+            return;
+        }
+        final String suggest = SyncManager.suggestedDeviceId(this);
+        new AlertDialog.Builder(this)
+                .setTitle("选择设备标识")
+                .setMessage("每台手机在仓库里占一个目录，标识确定后不可修改。\n\n"
+                        + "· 这台手机第一次用：新建本机标识\n"
+                        + "· 重装应用：从仓库选择原有设备，可把历史数据拉回本机\n\n"
+                        + "建议标识：" + suggest)
+                .setPositiveButton("新建本机标识", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        if (SyncManager.bind(MainActivity.this, suggest)) {
+                            Toast.makeText(MainActivity.this, "已绑定 " + suggest,
+                                    Toast.LENGTH_SHORT).show();
+                            refreshStatus();
+                        }
+                    }
+                })
+                .setNeutralButton("从仓库选择", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        startActivity(new Intent(MainActivity.this, SyncActivity.class)
+                                .putExtra(SyncActivity.EXTRA_PICK, true));
+                    }
+                })
+                .setNegativeButton("稍后", null)
+                .show();
     }
 
     @Override
@@ -191,6 +232,9 @@ public class MainActivity extends Activity {
             store.close();
         }
 
+        sb.append("设备标识：").append(SyncManager.isBound(this)
+                ? SyncManager.deviceId(this) + "（已锁定）" : "未确定").append('\n');
+
         long syncOk = SyncManager.lastSuccess(this);
         if (syncOk > 0) {
             long hours = (System.currentTimeMillis() - syncOk) / 3600000L;
@@ -206,11 +250,14 @@ public class MainActivity extends Activity {
         status.setText(sb.toString());
     }
 
-    /** 已配置仓库就顺带同步一次；未配置或缺少必要密钥时返回 null。 */
+    /** 已配置仓库就顺带同步一次；未配置、未绑定或缺少必要密钥时返回 null。 */
     private String syncIfConfigured() {
         SyncManager.Config c = SyncManager.load(this);
         if (!c.hasRepo() || SyncManager.getToken(this) == null) {
             return null;
+        }
+        if (!SyncManager.isBound(this)) {
+            return "未同步：尚未确定设备标识";
         }
         if (c.mode == Crypto.MODE_PASSWORD && !SyncManager.hasPassword(this)) {
             return "未同步：密码模式尚未设置密码";

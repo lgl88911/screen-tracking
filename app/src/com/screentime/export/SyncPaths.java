@@ -15,7 +15,8 @@ import java.util.Locale;
 public final class SyncPaths {
 
     /** 所有设备都挂在这个前缀下，便于和 README 等仓库文件区分。 */
-    public static final String ROOT = "devices/";
+    public static final String ROOT_NAME = "devices";
+    public static final String ROOT = ROOT_NAME + "/";
 
     private static final SecureRandom RNG = new SecureRandom();
 
@@ -74,6 +75,19 @@ public final class SyncPaths {
             out = out.substring(0, 40).replaceAll("-+$", "");
         }
         return out.length() == 0 ? null : out;
+    }
+
+    /**
+     * 一次性绑定的判定：已有标识就一律拒绝，返回 null；否则返回清洗后的候选值。
+     *
+     * 「不能改」这条规则放在这里而不是界面里，是因为界面入口可以有好几个
+     * （首次引导、同步页、以后可能的后台恢复），闸口只留一个才不会漏。
+     */
+    public static String bindable(String existingRaw, String candidateRaw) {
+        if (sanitizeDeviceId(existingRaw) != null) {
+            return null;
+        }
+        return sanitizeDeviceId(candidateRaw);
     }
 
     /**

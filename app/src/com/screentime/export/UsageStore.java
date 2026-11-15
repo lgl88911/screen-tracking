@@ -8,6 +8,7 @@ import android.database.sqlite.SQLiteOpenHelper;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 累积存储。逐日数据按「整天覆盖」写入：同一日期重复采集结果幂等，
@@ -145,6 +146,142 @@ public class UsageStore extends SQLiteOpenHelper {
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
+        }
+    }
+
+    // ------------------------------------------------------------ 从仓库快照导入
+
+    public static class ImportStat {
+        public int daysNew;
+        public int daysUpdated;
+        public int daysSkipped;
+        public int appRows;
+        public int aggRows;
+        public String from;
+        public String to;
+        public long totalScreenOnMs;
+
+        public String describe() {
+            StringBuilder sb = new StringBuilder();
+            sb.append("导入 ").append(daysNew + daysUpdated).append(" 天");
+            if (from != null) {
+                sb.append("（").append(from).append(" ~ ").append(to).append("）");
+            }
+            sb.append("\n新增 ").append(daysNew).append(" 天 / 更新 ").append(daysUpdated)
+                    .append(" 天 / 跳过 ").append(daysSkipped).append(" 天");
+            sb.append("\n应用记录 ").append(appRows).append(" 条 / 周期聚合 ").append(aggRows).append(" 条");
+            return sb.toString();
+        }
+    }
+
+    /**
+     * 把仓库快照合并进本地库：逐日比较 updated_at，快照更新才覆盖。
+     *
+     * 用「整天删后重插」而不是逐列更新，与采集侧语义一致：同一天重复导入结果不变。
+     * 聚合桶同样只覆盖快照里出现的桶，其他类型的旧桶保留。
+     */
+    public ImportStat importSnapshot(SnapshotImporter.Snapshot snap) {
+        ImportStat st = new ImportStat();
+        if (snap == null) {
+            return st;
+        }
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            for (SnapshotImporter.Day d : snap.days) {
+                long local = localUpdatedAt(db, d.date);
+                if (!SnapshotImporter.shouldReplace(local, d.collectedAt)) {
+                    st.daysSkipped++;
+                    continue;
+                }
+                boolean existed = local > 0;
+                db.delete("days", "day=?", new String[]{d.date});
+                db.delete("usage", "day=?", new String[]{d.date});
+
+                ContentValues cv = new ContentValues();
+                cv.put("day", d.date);
+                cv.put("screen_on_ms", d.screenOnMs);
+                cv.put("unlock_count", d.unlocks);
+                cv.put("foreground_ms", d.foregroundMs);
+                cv.put("updated_at", d.collectedAt);
+                db.insert("days", null, cv);
+
+                for (SnapshotImporter.App a : d.apps) {
+                    if (a.foregroundMs <= 0 && a.launches <= 0) continue;
+                    ContentValues uv = new ContentValues();
+                    uv.put("day", d.date);
+                    uv.put("pkg", a.pkg);
+                    uv.put("label", a.label);
+                    uv.put("foreground_ms", a.foregroundMs);
+                    uv.put("launch_count", a.launches);
+                    uv.put("last_used", a.lastUsed);
+                    db.insert("usage", null, uv);
+                    st.appRows++;
+                }
+                if (existed) {
+                    st.daysUpdated++;
+                } else {
+                    st.daysNew++;
+                }
+                st.totalScreenOnMs += d.screenOnMs;
+                if (st.from == null || d.date.compareTo(st.from) < 0) st.from = d.date;
+                if (st.to == null || d.date.compareTo(st.to) > 0) st.to = d.date;
+            }
+
+            // 聚合桶按 kind 分组，只删快照里返回的桶
+            Map<String, java.util.LinkedHashSet<Long>> buckets =
+                    new java.util.LinkedHashMap<String, java.util.LinkedHashSet<Long>>();
+            for (SnapshotImporter.Agg a : snap.aggs) {
+                java.util.LinkedHashSet<Long> set = buckets.get(a.kind);
+                if (set == null) {
+                    set = new java.util.LinkedHashSet<Long>();
+                    buckets.put(a.kind, set);
+                }
+                set.add(a.bucket);
+            }
+            for (Map.Entry<String, java.util.LinkedHashSet<Long>> en : buckets.entrySet()) {
+                StringBuilder in = new StringBuilder();
+                String[] args = new String[en.getValue().size() + 1];
+                args[0] = en.getKey();
+                int i = 1;
+                for (Long b : en.getValue()) {
+                    if (i > 1) in.append(',');
+                    in.append('?');
+                    args[i++] = String.valueOf(b);
+                }
+                db.delete("aggs", "kind=? AND bucket IN (" + in + ")", args);
+            }
+            for (SnapshotImporter.Agg a : snap.aggs) {
+                ContentValues cv = new ContentValues();
+                cv.put("kind", a.kind);
+                cv.put("bucket", a.bucket);
+                cv.put("pkg", a.pkg);
+                cv.put("label", a.label);
+                cv.put("total_ms", a.totalMs);
+                cv.put("last_used", a.lastUsed);
+                db.insertWithOnConflict("aggs", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+                st.aggRows++;
+            }
+
+            ContentValues meta = new ContentValues();
+            meta.put("k", "import_at");
+            meta.put("v", String.valueOf(System.currentTimeMillis()));
+            db.insertWithOnConflict("meta", null, meta, SQLiteDatabase.CONFLICT_REPLACE);
+
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        return st;
+    }
+
+    private static long localUpdatedAt(SQLiteDatabase db, String day) {
+        Cursor c = null;
+        try {
+            c = db.rawQuery("SELECT updated_at FROM days WHERE day=?", new String[]{day});
+            return c.moveToFirst() ? c.getLong(0) : 0L;
+        } finally {
+            if (c != null) c.close();
         }
     }
 

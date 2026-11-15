@@ -43,8 +43,8 @@ echo "==> aapt2 link"
     --manifest "$APP_DIR/AndroidManifest.xml" \
     --min-sdk-version 26 \
     --target-sdk-version 33 \
-    --version-code 3 \
-    --version-name 2.1
+    --version-code 4 \
+    --version-name 2.2
 
 echo "==> javac"
 find "$APP_DIR/src" -name '*.java' > "$BUILD/sources.txt"

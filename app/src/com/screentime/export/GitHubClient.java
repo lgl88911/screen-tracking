@@ -73,6 +73,93 @@ public class GitHubClient {
         return info;
     }
 
+    // ------------------------------------------------------------ 读取仓库内容
+
+    /**
+     * 仓库里已有哪些设备目录。空仓库或还没上传过任何设备时返回空列表，
+     * 不抛错 —— 「第一次用，仓库里什么都没有」是正常状态。
+     */
+    public java.util.List<String> listDevices() throws IOException {
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        String raw;
+        try {
+            raw = request("GET", "/repos/" + owner + "/" + repo + "/contents/" + SyncPaths.ROOT_NAME, null);
+        } catch (ApiException e) {
+            if (e.status == 404 || e.status == 409) {
+                return out;
+            }
+            throw e;
+        }
+        JSONArray arr;
+        try {
+            arr = new JSONArray(raw);
+        } catch (JSONException e) {
+            return out;
+        }
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject o = arr.optJSONObject(i);
+            if (o == null) continue;
+            if (!"dir".equals(o.optString("type", ""))) continue;
+            String name = o.optString("name", "");
+            if (name.length() == 0 || "null".equals(name)) continue;
+            out.add(name);
+        }
+        java.util.Collections.sort(out);
+        return out;
+    }
+
+    /**
+     * 取设备的最新全量快照。优先 latest.sce；老仓库或手工清理过时回退到最新的日快照，
+     * 两者内容口径相同（每次上传的都是全量），只是文件名不同。
+     */
+    public byte[] downloadLatest(String device) throws IOException {
+        try {
+            return download(SyncPaths.latest(device));
+        } catch (ApiException e) {
+            if (e.status != 404) {
+                throw e;
+            }
+        }
+        String fallback = newestDayFile(device);
+        if (fallback == null) {
+            throw new ApiException(404, "该设备目录下没有 latest.sce，也没有日快照");
+        }
+        return download(fallback);
+    }
+
+    /** 按原始字节下载仓库文件（contents API 的 raw 媒体类型，不受 1 MB 的 JSON 上限限制）。 */
+    public byte[] download(String path) throws IOException {
+        return call("GET", "/repos/" + owner + "/" + repo + "/contents/" + path, null,
+                "application/vnd.github.raw");
+    }
+
+    /** 在 devices/<id>/ 下找字典序最大的日快照路径，如 devices/x/2026/11/15.sce。 */
+    public String newestDayFile(String device) throws IOException {
+        RepoInfo info = repoInfo();
+        String raw = request("GET", "/repos/" + owner + "/" + repo + "/git/trees/"
+                + info.defaultBranch + "?recursive=1", null);
+        JSONArray tree;
+        try {
+            tree = new JSONObject(raw).optJSONArray("tree");
+        } catch (JSONException e) {
+            return null;
+        }
+        if (tree == null) {
+            return null;
+        }
+        String prefix = SyncPaths.deviceDir(device);
+        String best = null;
+        for (int i = 0; i < tree.length(); i++) {
+            JSONObject o = tree.optJSONObject(i);
+            if (o == null) continue;
+            String p = o.optString("path", "");
+            if (p.length() == 0 || !p.startsWith(prefix) || !p.endsWith(".sce")) continue;
+            if (p.equals(SyncPaths.latest(device))) continue;
+            if (best == null || p.compareTo(best) > 0) best = p;
+        }
+        return best;
+    }
+
     // ------------------------------------------------------------ 提交
 
     private static final byte[] BOOTSTRAP_README = (
@@ -302,6 +389,14 @@ public class GitHubClient {
     }
 
     private String request(String method, String path, String body) throws IOException {
+        return new String(call(method, path, body, null), UTF8);
+    }
+
+    /**
+     * 统一出口。返回原始字节：下载 .sce 时响应体是二进制，
+     * 按字符串读会把非 UTF-8 序列换成替换字符，解出来的 zip 就废了。
+     */
+    private byte[] call(String method, String path, String body, String accept) throws IOException {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(API + path).openConnection();
@@ -309,7 +404,7 @@ public class GitHubClient {
             conn.setConnectTimeout(CONNECT_TIMEOUT);
             conn.setReadTimeout(READ_TIMEOUT);
             conn.setRequestProperty("Authorization", "Bearer " + token);
-            conn.setRequestProperty("Accept", "application/vnd.github+json");
+            conn.setRequestProperty("Accept", accept == null ? "application/vnd.github+json" : accept);
             conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
             conn.setRequestProperty("User-Agent", "screentime-export");
 
@@ -327,11 +422,12 @@ public class GitHubClient {
             }
 
             int code = conn.getResponseCode();
-            String text = read(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
+            byte[] data = readBytes(code >= 200 && code < 300
+                    ? conn.getInputStream() : conn.getErrorStream());
             if (code < 200 || code >= 300) {
-                throw new ApiException(code, explain(code, text));
+                throw new ApiException(code, explain(code, new String(data, UTF8)));
             }
-            return text;
+            return data;
         } finally {
             if (conn != null) {
                 conn.disconnect();
@@ -358,12 +454,12 @@ public class GitHubClient {
         return hint + " — " + head(body);
     }
 
-    private static String read(InputStream in) throws IOException {
+    private static byte[] readBytes(InputStream in) throws IOException {
         if (in == null) {
-            return "";
+            return new byte[0];
         }
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        byte[] buf = new byte[4096];
+        byte[] buf = new byte[8192];
         try {
             int n;
             while ((n = in.read(buf)) > 0) {
@@ -372,7 +468,7 @@ public class GitHubClient {
         } finally {
             in.close();
         }
-        return new String(bos.toByteArray(), UTF8);
+        return bos.toByteArray();
     }
 
     private static String head(String s) {

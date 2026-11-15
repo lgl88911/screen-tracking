@@ -68,6 +68,13 @@ public class DeviceIdTest {
         check("机型为空回退 phone", SyncPaths.defaultDeviceId(null).startsWith("phone-"),
                 SyncPaths.defaultDeviceId(null));
 
+        // 一次性绑定：首次能定下来，之后任何输入都拿不到新值
+        check("首次绑定成功", "phone-a".equals(SyncPaths.bindable(null, "Phone A")),
+                String.valueOf(SyncPaths.bindable(null, "Phone A")));
+        check("已有标识时拒绝改绑", SyncPaths.bindable("phone-a", "phone-b") == null, "应返回 null");
+        check("已有标识时给同一个也拒绝", SyncPaths.bindable("phone-a", "phone-a") == null, "应返回 null");
+        check("候选非法时绑定失败", SyncPaths.bindable(null, "///") == null, "应返回 null");
+
         System.out.println();
         System.out.println("通过 " + pass + " 项，失败 " + fail + " 项");
         if (fail > 0) {
