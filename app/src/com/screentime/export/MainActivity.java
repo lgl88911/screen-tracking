@@ -238,8 +238,18 @@ public class MainActivity extends Activity {
 
         long syncOk = SyncManager.lastSuccess(this);
         if (syncOk > 0) {
-            long hours = (System.currentTimeMillis() - syncOk) / 3600000L;
-            sb.append("上次同步：").append(hours < 1 ? "1 小时内" : hours + " 小时前");
+            // 一分钟内不显示「1 小时内」这种粗粒度：刚同步完却写着 1 小时内，
+            // 会让人以为又该同步了
+            long min = (System.currentTimeMillis() - syncOk) / 60000L;
+            long hours = min / 60;
+            sb.append("上次同步：");
+            if (min < 1) {
+                sb.append("刚刚");
+            } else if (min < 60) {
+                sb.append(min).append(" 分钟前");
+            } else {
+                sb.append(hours).append(" 小时前");
+            }
             if (hours >= 48) {
                 sb.append("  ⚠ 已超 48 小时");
             }

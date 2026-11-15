@@ -231,6 +231,7 @@ public class UsageStore extends SQLiteOpenHelper {
             // 聚合桶按 kind 分组，只删快照里返回的桶
             Map<String, java.util.LinkedHashSet<Long>> buckets =
                     new java.util.LinkedHashMap<String, java.util.LinkedHashSet<Long>>();
+            java.util.HashSet<String> aggKeys = new java.util.HashSet<String>();
             for (SnapshotImporter.Agg a : snap.aggs) {
                 java.util.LinkedHashSet<Long> set = buckets.get(a.kind);
                 if (set == null) {
@@ -260,8 +261,11 @@ public class UsageStore extends SQLiteOpenHelper {
                 cv.put("total_ms", a.totalMs);
                 cv.put("last_used", a.lastUsed);
                 db.insertWithOnConflict("aggs", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
-                st.aggRows++;
+                // 快照里同一个桶会出现多次（每周/每月桶被逐日重复导出），
+                // 这里按主键去重计数，否则提示的条数会比库里实际行数多一倍
+                aggKeys.add(a.kind + '\u0001' + a.bucket + '\u0001' + a.pkg);
             }
+            st.aggRows = aggKeys.size();
 
             ContentValues meta = new ContentValues();
             meta.put("k", "import_at");
