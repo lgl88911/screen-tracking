@@ -38,21 +38,28 @@ public class Exporter {
         public long totalScreenOnMs;
     }
 
-    public static Result exportAll(Context ctx) {
-        Result res = new Result();
+    /** 生成好的 5 个文件与统计，供落盘与同步两条路径共用。 */
+    public static class Built {
+        public Map<String, byte[]> files = new LinkedHashMap<String, byte[]>();
+        public int dayCount;
+        public int appRows;
+        public long totalScreenOnMs;
+    }
+
+    /** 只构建内容不落盘，同步时直接拿去打包加密。 */
+    public static Built buildAll(Context ctx) throws Exception {
         UsageStore store = new UsageStore(ctx);
         try {
             List<UsageStore.DayRow> days = store.readDays();
             List<UsageStore.AppRow> usage = store.readUsage();
             List<UsageStore.AggRow> aggs = store.readAggs();
 
-            res.dayCount = days.size();
-            res.appRows = usage.size();
-            long sum = 0;
-            for (UsageStore.DayRow d : days) sum += d.screenOnMs;
-            res.totalScreenOnMs = sum;
-
-            String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+            Built b = new Built();
+            b.dayCount = days.size();
+            b.appRows = usage.size();
+            for (UsageStore.DayRow d : days) {
+                b.totalScreenOnMs += d.screenOnMs;
+            }
 
             long sysBucket = 0;
             try {
@@ -60,18 +67,30 @@ public class Exporter {
             } catch (Throwable ignore) {
             }
 
+            b.files.put("screentime.json",
+                    buildJson(ctx, days, usage, aggs, sysBucket).getBytes("UTF-8"));
+            b.files.put("daily_summary.csv", buildDailyCsv(days, usage).getBytes("UTF-8"));
+            b.files.put("app_daily.csv", buildAppDailyCsv(usage).getBytes("UTF-8"));
+            b.files.put("app_total.csv", buildAppTotalCsv(days, usage).getBytes("UTF-8"));
+            b.files.put("aggregates.csv", buildAggCsv(aggs).getBytes("UTF-8"));
+            return b;
+        } finally {
+            store.close();
+        }
+    }
+
+    public static Result exportAll(Context ctx) {
+        Result res = new Result();
+        try {
+            Built b = buildAll(ctx);
+            res.dayCount = b.dayCount;
+            res.appRows = b.appRows;
+            res.totalScreenOnMs = b.totalScreenOnMs;
+            res.stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+
             // 固定文件名：导出的永远是「当前全量快照」，历史累积在数据库里，
             // 不靠文件多版本，否则每天点一次就堆几百 KB。
-            Map<String, byte[]> files = new LinkedHashMap<String, byte[]>();
-            files.put("screentime.json",
-                    buildJson(ctx, days, usage, aggs, sysBucket).getBytes("UTF-8"));
-            files.put("daily_summary.csv", buildDailyCsv(days, usage).getBytes("UTF-8"));
-            files.put("app_daily.csv", buildAppDailyCsv(usage).getBytes("UTF-8"));
-            files.put("app_total.csv", buildAppTotalCsv(days, usage).getBytes("UTF-8"));
-            files.put("aggregates.csv", buildAggCsv(aggs).getBytes("UTF-8"));
-            res.stamp = stamp;
-
-            for (Map.Entry<String, byte[]> en : files.entrySet()) {
+            for (Map.Entry<String, byte[]> en : b.files.entrySet()) {
                 if (writeOne(ctx, en.getKey(), en.getValue())) res.written.add(en.getKey());
                 else res.failed.add(en.getKey());
             }
@@ -82,8 +101,6 @@ public class Exporter {
         } catch (Throwable t) {
             res.failed.add("EXPORT_ERROR " + t);
             return res;
-        } finally {
-            store.close();
         }
     }
 

@@ -94,6 +94,38 @@ adb pull /sdcard/Android/data/com.screentime.export/files/exports/ ./export/
 
 导出文件用**固定文件名**（永远是当前全量快照），不会因反复导出而堆文件；历史累积在数据库里而不是文件多版本里。
 
+## 同步到私有仓库（可选）
+
+首页「同步到私有仓库（加密可选）」进入配置页。把每日快照打包上传到 GitHub 私有仓库，
+历史因此在手机之外多一份异地副本。
+
+**加密三档**，随时切换，不需要重装：
+
+| 模式 | 手机持有 | 云端可见 | 自动化 |
+|---|---|---|---|
+| 不加密（默认） | 无 | 完整明文 | 全自动；上传前会确认仓库为 private，不是则拒绝 |
+| 密码加密 | 密码派生的 DEK（Keystore 缓存） | 密文 | 首次输入密码，之后后台自动复用 |
+| 公钥加密 | 仅 RSA 公钥 | 密文 | 全自动，私钥留在电脑 |
+
+三档共用同一个自描述容器（`SCE1` + 模式字节 + 内容），扩展名统一 `.sce`。
+PC 端 `tools/decrypt.py` 读模式字节自动分支，不需要告诉它用哪种。
+
+**配置**：仓库填 `owner/repo` 或直接粘贴 clone 地址；Token 用 fine-grained PAT，
+只授该仓库 `Contents: Read and write`，建议 90 天轮换。Token 与密码派生密钥都经
+Android Keystore 加密后才落盘。
+
+**上传时机**：采集后自动（含后台 Job 与启动补采），也可在配置页点「立即同步」。
+仓库路径为 `YYYY/MM/DD.sce` 外加一份 `latest.sce`，单次上传一个 commit，走 Git Data API 原子提交。
+
+**在电脑上解开**：
+
+```bash
+python3 tools/genkeys.py -o ~/.config/screentime/   # 仅公钥模式需要
+python3 tools/decrypt.py 2026/11/15.sce -o out/     # 模式自动识别，密码模式会提示输入
+```
+
+完整设计（容器字节布局、六步 API、密钥管理、风险对策）见 `docs/sync-design.md`。
+
 ## 导出文件
 
 | 文件 | 内容 |
@@ -122,11 +154,15 @@ CSV 带 BOM 的 UTF-8，Excel 直接打开不乱码。每次导出覆盖同名�
 ## 单测
 
 ```bash
-bash app/test/run.sh
+bash app/test/run.sh          # 事件重建算法 22 项
+bash app/test/run_crypto.sh   # 三档加密封装 14 项，并在 /tmp/sce-test 留下跨语言验证样本
 ```
 
-`UsageAnalyzer` 不引用 `android.*`，桌面 JDK 直接跑，覆盖跨午夜切分、灭屏/关机收口、末尾截断、启动去重、
-同时刻事件排序、乱序输入、空输入等 22 个断言。
+`UsageAnalyzer` 与 `Crypto` 都不引用 `android.*`，桌面 JDK 直接跑。前者覆盖跨午夜切分、
+灭屏/关机收口、末尾截断、启动去重、同时刻事件排序、乱序输入、空输入；后者覆盖三档往返、
+错误密码被拒、GCM 检出篡改、zip 可复现、缺私钥时明确报错。
+
+`run_crypto.sh` 跑完可以用 `tools/decrypt.py` 解 `/tmp/sce-test/*.sce` 验证与 Python 侧互通。
 
 ## 目录
 
@@ -140,12 +176,19 @@ app/
     Collector.java            查询 UsageStats、补中文名、落库
     Exporter.java             JSON + 4 份 CSV，MediaStore / 外部目录双写
     ReportActivity.java       按时间段查看报表（总时间 / 排名 / 指定应用）
-    AutoCollectService.java   JobService 后台快照
+    Crypto.java               三档封装与解包（zip / PBKDF2 / AES-GCM / RSA-OAEP）
+    GitHubClient.java         Git Data API 六步原子提交
+    SecretStore.java          Keystore 保护 Token 与密码派生 DEK
+    SyncManager.java          同步编排：打包 → 加密 → 上传 → 记录状态
+    SyncActivity.java         同步设置界面
+    AutoCollectService.java   JobService 后台快照 + 顺带同步
     MainActivity.java         单页界面
-  test/                       AnalyzerTest + run.sh
+  test/                       AnalyzerTest / CryptoTest + 对应 run.sh
 miui_install_confirm.py       MIUI 安装弹窗自动确认
 tools/gen_report.py           由 screentime.json 生成 report.html
-docs/sync-design.md           同步到私有仓库的方案设计（加密 + GitHub API）
+tools/genkeys.py              生成 RSA 密钥对（公钥加密模式）
+tools/decrypt.py              PC 端三档解密解包
+docs/sync-design.md           同步方案设计（容器格式、API、密钥管理、风险）
 ```
 
 下列内容含真实使用数据或签名密钥，已在 `.gitignore` 中排除，不会进入版本库：

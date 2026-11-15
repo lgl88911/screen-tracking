@@ -101,6 +101,17 @@ public class MainActivity extends Activity {
         });
         root.addView(reportBtn, lp(-1, dp(44)));
 
+        Button syncBtn = new Button(this);
+        syncBtn.setText("同步到私有仓库（加密可选）");
+        syncBtn.setAllCaps(false);
+        syncBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, SyncActivity.class));
+            }
+        });
+        root.addView(syncBtn, lp(-1, dp(44)));
+
         status = new TextView(this);
         status.setTextSize(13);
         status.setTextColor(Color.rgb(40, 40, 40));
@@ -179,8 +190,33 @@ public class MainActivity extends Activity {
         } finally {
             store.close();
         }
+
+        long syncOk = SyncManager.lastSuccess(this);
+        if (syncOk > 0) {
+            long hours = (System.currentTimeMillis() - syncOk) / 3600000L;
+            sb.append("上次同步：").append(hours < 1 ? "1 小时内" : hours + " 小时前");
+            if (hours >= 48) {
+                sb.append("  ⚠ 已超 48 小时");
+            }
+            sb.append('\n');
+        } else if (SyncManager.load(this).hasRepo()) {
+            sb.append("上次同步：从未成功\n");
+        }
         sb.append("\n导出位置：\n下载/ScreentimeExport/");
         status.setText(sb.toString());
+    }
+
+    /** 已配置仓库就顺带同步一次；未配置或缺少必要密钥时返回 null。 */
+    private String syncIfConfigured() {
+        SyncManager.Config c = SyncManager.load(this);
+        if (!c.hasRepo() || SyncManager.getToken(this) == null) {
+            return null;
+        }
+        if (c.mode == Crypto.MODE_PASSWORD && !SyncManager.hasPassword(this)) {
+            return "未同步：密码模式尚未设置密码";
+        }
+        SyncManager.Result r = SyncManager.syncNow(this);
+        return r.ok ? "已同步：" + r.message : "同步失败：" + r.message;
     }
 
     private static String hhmm(long ms) {
@@ -234,6 +270,10 @@ public class MainActivity extends Activity {
                     sb.append("本次覆盖：").append(rr.dayCount).append(" 天\n");
                     sb.append("库存：").append(rr.appRows).append(" 条应用记录 / ")
                             .append(rr.aggRows).append(" 条聚合\n");
+                    String syncMsg = syncIfConfigured();
+                    if (syncMsg != null) {
+                        sb.append('\n').append(syncMsg).append('\n');
+                    }
                     sb.append("\n需要文件时点上方「采集并导出」。");
                     ui.post(new Runnable() {
                         @Override
@@ -264,6 +304,11 @@ public class MainActivity extends Activity {
                     for (String f : er.failed) sb.append("× ").append(f).append('\n');
                 }
                 sb.append('\n').append(er.dirHint);
+
+                String syncMsg = syncIfConfigured();
+                if (syncMsg != null) {
+                    sb.append("\n\n").append(syncMsg);
+                }
 
                 ui.post(new Runnable() {
                     @Override

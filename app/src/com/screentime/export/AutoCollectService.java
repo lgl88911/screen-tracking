@@ -9,8 +9,11 @@ import android.content.Context;
 import android.util.Log;
 
 /**
- * 后台增量快照：每 6 小时跑一次采集入库（不导出，省事）。
- * setPersisted(true) 使任务在重启后仍保留，历史因此在系统清理窗口之外也能持续累积。
+ * 后台快照：每 6 小时跑一次采集入库，已配置仓库时顺带同步一份。
+ *
+ * 刻意不设网络约束（NETWORK_TYPE_NONE 表示「不要求网络」，是最容易被调度的档位）：
+ * 采集受系统 11 天窗口限制，断一次就是永久缺失；而同步每次都是全量快照，
+ * 这次传不上去下次补即可。所以绝不能让网络状态挡住采集。
  */
 public class AutoCollectService extends JobService {
 
@@ -43,6 +46,12 @@ public class AutoCollectService extends JobService {
                     Collector.RunResult rr = Collector.collectAndStore(AutoCollectService.this);
                     Log.i(TAG, "auto collect days=" + rr.dayCount + " events=" + rr.eventCount
                             + " err=" + rr.error);
+                    if (rr.error == null) {
+                        String err = trySync();
+                        if (err != null) {
+                            Log.w(TAG, "sync: " + err);
+                        }
+                    }
                 } else {
                     Log.w(TAG, "usage access denied, skip");
                 }
@@ -55,5 +64,22 @@ public class AutoCollectService extends JobService {
     @Override
     public boolean onStopJob(JobParameters params) {
         return true;
+    }
+
+    /** 返回 null 表示成功或未配置；否则返回失败原因供日志记录。 */
+    private String trySync() {
+        try {
+            SyncManager.Config c = SyncManager.load(this);
+            if (!c.hasRepo() || SyncManager.getToken(this) == null) {
+                return null;
+            }
+            if (c.mode == Crypto.MODE_PASSWORD && !SyncManager.hasPassword(this)) {
+                return "密码模式缺少密码，跳过";
+            }
+            SyncManager.Result r = SyncManager.syncNow(this);
+            return r.ok ? null : r.message;
+        } catch (Throwable t) {
+            return String.valueOf(t);
+        }
     }
 }

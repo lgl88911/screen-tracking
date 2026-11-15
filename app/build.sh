@@ -41,18 +41,24 @@ echo "==> aapt2 link"
     -o "$BUILD/base.apk" \
     -I "$PLATFORM/android.jar" \
     --manifest "$APP_DIR/AndroidManifest.xml" \
-    --min-sdk-version 23 \
+    --min-sdk-version 26 \
     --target-sdk-version 33 \
-    --version-code 2 \
-    --version-name 2.0
+    --version-code 3 \
+    --version-name 2.1
 
 echo "==> javac"
 find "$APP_DIR/src" -name '*.java' > "$BUILD/sources.txt"
-"$JAVAC" -bootclasspath "$PLATFORM/android.jar" \
+# 注意：不能把 javac 接进管道再 || true，那样编译失败会被吞掉、继续打出坏包
+if ! "$JAVAC" -bootclasspath "$PLATFORM/android.jar" \
     -source 8 -target 8 \
     -encoding UTF-8 \
     -d "$BUILD/classes" \
-    @"$BUILD/sources.txt" 2>&1 | grep -v "^警告" || true
+    @"$BUILD/sources.txt" > "$BUILD/javac.log" 2>&1; then
+    grep -v "^注:" "$BUILD/javac.log" || true
+    echo "==> 编译失败，中止" >&2
+    exit 1
+fi
+grep -v "^注:" "$BUILD/javac.log" || true
 
 echo "==> d8"
 find "$BUILD/classes" -name '*.class' > "$BUILD/classes.txt"
